@@ -189,19 +189,99 @@ PVOID FetchModuleBaseAddr(IN UINT32 dwModuleNameHash) {
 }
 
 // -----------------------------------------------
+// Validate DOS + NT signatures on a loaded module
+// base. Returns TRUE + *ppNt on success.
+// -----------------------------------------------
+BOOL ValidatePeHeaders(IN PVOID pModuleBase, OUT PIMAGE_NT_HEADERS* ppNt) {
+
+    if (!pModuleBase || !ppNt)
+        return FALSE;
+
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pModuleBase;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
+        return FALSE;
+
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pModuleBase + pDos->e_lfanew);
+    if (pNt->Signature != IMAGE_NT_SIGNATURE)
+        return FALSE;
+
+    *ppNt = pNt;
+    return TRUE;
+}
+
+// -----------------------------------------------
+// Validate DOS + NT signatures on a PE buffer read
+// off disk. Additionally verifies the NT header fits
+// within sBufSize, since the buffer may be a partial
+// read (e.g. 1024-byte PE-header sniff).
+// -----------------------------------------------
+BOOL ValidatePeHeadersBounded(IN PVOID pBuffer, IN SIZE_T sBufSize, OUT PIMAGE_NT_HEADERS* ppNt) {
+
+    if (!pBuffer || !ppNt || sBufSize < sizeof(IMAGE_DOS_HEADER))
+        return FALSE;
+
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBuffer;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
+        return FALSE;
+
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pBuffer + pDos->e_lfanew);
+    if ((PBYTE)pNt + sizeof(IMAGE_NT_HEADERS) > (PBYTE)pBuffer + sBufSize)
+        return FALSE;
+    if (pNt->Signature != IMAGE_NT_SIGNATURE)
+        return FALSE;
+
+    *ppNt = pNt;
+    return TRUE;
+}
+
+// -----------------------------------------------
+// Scan pModule's executable sections for byte pattern
+// pPattern (dwPatternLen bytes) and append every hit
+// to pPool until GADGET_POOL_CAPACITY is reached.
+// -----------------------------------------------
+VOID GadgetPoolScanModule(IN OUT PGADGET_POOL pPool, IN PVOID pModule, IN const BYTE* pPattern, IN DWORD dwPatternLen) {
+
+    if (!pPool || !pModule || !pPattern || dwPatternLen == 0)
+        return;
+
+    PIMAGE_NT_HEADERS pNt = NULL;
+    if (!ValidatePeHeaders(pModule, &pNt))
+        return;
+
+    PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+    for (WORD s = 0; s < pNt->FileHeader.NumberOfSections && pPool->dwCount < GADGET_POOL_CAPACITY; s++) {
+        if (!(pSec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE))
+            continue;
+
+        PBYTE pStart = (PBYTE)pModule + pSec[s].VirtualAddress;
+        DWORD dwSize = pSec[s].Misc.VirtualSize;
+
+        for (DWORD j = 0; j + dwPatternLen <= dwSize && pPool->dwCount < GADGET_POOL_CAPACITY; j++) {
+            BOOL bMatch = TRUE;
+            for (DWORD k = 0; k < dwPatternLen; k++) {
+                if (pStart[j + k] != pPattern[k]) { bMatch = FALSE; break; }
+            }
+            if (bMatch)
+                pPool->pGadgets[pPool->dwCount++] = (PVOID)(pStart + j);
+        }
+    }
+}
+
+PVOID GadgetPoolRandom(IN const PGADGET_POOL pPool) {
+
+    if (!pPool || pPool->dwCount == 0)
+        return NULL;
+    DWORD idx = (DWORD)(__rdtsc() % pPool->dwCount);
+    return pPool->pGadgets[idx];
+}
+
+// -----------------------------------------------
 // Fetch export address from a module (hash-based)
 // -----------------------------------------------
 PVOID FetchExportAddress(IN PVOID pModuleBase, IN UINT32 dwApiNameHash) {
 
-    if (!pModuleBase)
-        return NULL;
-
-    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pModuleBase;
-    if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
-        return NULL;
-
-    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pModuleBase + pDos->e_lfanew);
-    if (pNt->Signature != IMAGE_NT_SIGNATURE)
+    PIMAGE_NT_HEADERS pNt = NULL;
+    if (!ValidatePeHeaders(pModuleBase, &pNt))
         return NULL;
 
     if (pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size == 0)

@@ -328,10 +328,8 @@ BOOL BlindDllNotifications(IN PAPI_HASHING pApi) {
         return FALSE;
 
     // --- Get ntdll image size for address range check ---
-    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)hNtdll;
-    if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
-    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)hNtdll + pDos->e_lfanew);
-    if (pNt->Signature != IMAGE_NT_SIGNATURE) return FALSE;
+    PIMAGE_NT_HEADERS pNt = NULL;
+    if (!ValidatePeHeaders((PVOID)hNtdll, &pNt)) return FALSE;
     ULONG_PTR uNtdllStart = (ULONG_PTR)hNtdll;
     ULONG_PTR uNtdllEnd   = uNtdllStart + pNt->OptionalHeader.SizeOfImage;
 

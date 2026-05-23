@@ -11,11 +11,9 @@
 static NTDLL_CONFIG g_NtdllConfig = { 0 };
 
 // Syscall gadget pool for randomization
-#define MAX_SYSCALL_GADGETS 64
-static struct {
-    PVOID   pGadgets[MAX_SYSCALL_GADGETS];
-    DWORD   dwCount;
-} g_GadgetPool = { 0 };
+static GADGET_POOL g_GadgetPool = { 0 };
+// `syscall;ret` pattern.
+static const BYTE g_SyscallRetPattern[] = { 0x0F, 0x05, 0xC3 };
 
 // -----------------------------------------------
 // Initialize NTDLL config by walking the PEB
@@ -44,12 +42,8 @@ BOOL InitNtdllConfigStructure(VOID) {
     if (!pDte || !pDte->DllBase)
         return FALSE;
 
-    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pDte->DllBase;
-    if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
-        return FALSE;
-
-    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pDte->DllBase + pDos->e_lfanew);
-    if (pNt->Signature != IMAGE_NT_SIGNATURE)
+    PIMAGE_NT_HEADERS pNt = NULL;
+    if (!ValidatePeHeaders(pDte->DllBase, &pNt))
         return FALSE;
 
     PIMAGE_EXPORT_DIRECTORY pExport = (PIMAGE_EXPORT_DIRECTORY)(
@@ -80,25 +74,7 @@ static BOOL CollectSyscallGadgets(VOID) {
     if (!g_NtdllConfig.uModule)
         return FALSE;
 
-    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)g_NtdllConfig.uModule;
-    PIMAGE_NT_HEADERS pNt  = (PIMAGE_NT_HEADERS)(g_NtdllConfig.uModule + pDos->e_lfanew);
-    PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
-
-    for (WORD s = 0; s < pNt->FileHeader.NumberOfSections; s++) {
-        if (!(pSec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE))
-            continue;
-
-        PBYTE pStart = (PBYTE)(g_NtdllConfig.uModule + pSec[s].VirtualAddress);
-        DWORD dwSize = pSec[s].Misc.VirtualSize;
-
-        for (DWORD j = 0; j + 2 < dwSize && g_GadgetPool.dwCount < MAX_SYSCALL_GADGETS; j++) {
-            // syscall (0F 05) + ret (C3)
-            if (pStart[j] == 0x0F && pStart[j + 1] == 0x05 && pStart[j + 2] == 0xC3) {
-                g_GadgetPool.pGadgets[g_GadgetPool.dwCount++] = (PVOID)(pStart + j);
-            }
-        }
-    }
-
+    GadgetPoolScanModule(&g_GadgetPool, (PVOID)g_NtdllConfig.uModule, g_SyscallRetPattern, sizeof(g_SyscallRetPattern));
     return g_GadgetPool.dwCount > 0;
 }
 
@@ -107,10 +83,7 @@ static BOOL CollectSyscallGadgets(VOID) {
 // Uses RDTSC for fast, non-deterministic selection.
 // -----------------------------------------------
 PVOID GetRandomGadget(VOID) {
-    if (g_GadgetPool.dwCount == 0)
-        return NULL;
-    DWORD idx = (DWORD)(__rdtsc() % g_GadgetPool.dwCount);
-    return g_GadgetPool.pGadgets[idx];
+    return GadgetPoolRandom(&g_GadgetPool);
 }
 
 // -----------------------------------------------
@@ -298,12 +271,8 @@ static BOOL SwitchToCleanNtdll(IN PNT_SYSCALL pNtOpen, IN PNT_SYSCALL pNtMap, IN
         return FALSE;
 
     // Parse clean PE to locate the export directory
-    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pClean;
-    if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
-        return FALSE;
-
-    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pClean + pDos->e_lfanew);
-    if (pNt->Signature != IMAGE_NT_SIGNATURE)
+    PIMAGE_NT_HEADERS pNt = NULL;
+    if (!ValidatePeHeaders(pClean, &pNt))
         return FALSE;
 
     if (pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size == 0)

