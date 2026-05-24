@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Tiny HTTPS server that hands out data.enc as /payload.dat.
+"""Tiny HTTPS server that hands out a single encrypted payload at /payload.dat
+(or /data.enc — both URLs map to the same file).
 
 Self-signed cert auto-generated in --certdir. Loader's WinINet retries with
 SECURITY_FLAG_IGNORE_UNKNOWN_CA on first failure, so cert validity doesn't matter.
 
 Usage:
-    python host-payload.py --port 9443 --enc payloads/sliver-data.enc
+    python host-payload.py --port 18443 --enc payloads/sliver-payload.dat
 """
 import argparse
 import os

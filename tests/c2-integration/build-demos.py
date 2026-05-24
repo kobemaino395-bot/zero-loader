@@ -77,7 +77,10 @@ def main():
         per_dir = DEMOS / label
         per_dir.mkdir(exist_ok=True)
         shutil.copy2(artifact, per_dir / out_name)
-        shutil.copy2(ROOT / "data.enc", ENC_DIR / f"{label}.dat")
+        # Encrypt.py now derives output filename from URL, so the file is
+        # already named "<label>.dat" — just move it to the serving dir.
+        enc_src = ROOT / f"{label}.dat"
+        shutil.copy2(enc_src, ENC_DIR / f"{label}.dat")
 
         # for sideload: also stage clip.exe + version_orig.dll into the same dir
         if kind == "sideload":

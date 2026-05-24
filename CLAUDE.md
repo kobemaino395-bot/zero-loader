@@ -128,7 +128,7 @@ Deployment:
 1. Rename the real `<target>.dll` to `<target>_orig.dll`
 2. Place the built `<target>.dll` (proxy) alongside the host executable
 3. Place `<target>_orig.dll` in the same directory
-4. Upload `data.enc` to the C2 server
+4. Upload the encrypted payload file (named after the URL basename, e.g. `payload.dat`) to the staging server
 5. Run the host executable
 
 DLL sideload execution flow:
