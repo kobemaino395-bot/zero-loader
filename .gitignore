@@ -26,3 +26,20 @@ web/workspace/
 
 # Misc
 _build.bat
+
+# C2 integration tests — artifacts (binaries, shellcodes, certs, cloned repos)
+tests/c2-integration/adaptix/AdaptixC2/
+tests/c2-integration/certs/
+tests/c2-integration/nasm*
+tests/c2-integration/payloads/*.bin
+tests/c2-integration/payloads/*.enc
+tests/c2-integration/demos/_payloads/
+tests/c2-integration/demos/_zero-loader-demos.zip
+tests/c2-integration/demos/*/*.exe
+tests/c2-integration/demos/*/*.dll
+tests/c2-integration/demos/*.exe
+tests/c2-integration/calc-demo/*.exe
+tests/c2-integration/calc-demo/*.bin
+tests/c2-integration/calc-demo/*.obj
+tests/c2-integration/logs/
+tests/c2-integration/runtime/

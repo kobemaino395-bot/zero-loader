@@ -1,0 +1,3 @@
+jobs
+generate --http https://127.0.0.1:8443 --os windows --arch amd64 --format shellcode --shellcode-encoder none --save /home/sliver/zero-sliver.bin --skip-symbols --name zero
+exit

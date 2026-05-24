@@ -38,8 +38,10 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 |:--|:--|
 | **Indirect Syscalls** | SSN sourced from a clean `\KnownDlls\ntdll.dll` section (defeats userland hooks on ntdll). 64 `syscall;ret` gadgets pooled, randomly selected per call via RDTSC. Hooked-stub fallback for neighbour-SSN recovery |
 | **Patchless AMSI/ETW** | VEH + hardware breakpoints (DR0/DR1) via `NtContinue` — zero bytes modified, passes integrity checks |
-| **Phantom DLL Hollowing** | Auto-scans System32 for suitable DLL → copies to temp → NTFS transaction → SEC_IMAGE → rollback. EDR sees legitimate DLL-backed memory |
-| **Module Stomping + `.pdata`** | Overwrite signed DLL `.text` with shellcode, then register a synthetic `RUNTIME_FUNCTION` via `RtlAddFunctionTable`. Defeats Elastic 8.11+ kernel ETW callstack validation that flags stomped regions with no `.pdata` entry |
+| **Module Stomping + `.pdata`** | **Primary path.** Picks a sacrificial DLL from a 4-entry allowlist (xpsservices / mfreadwrite / dbgcore / mfsensorgroup — low-sensitivity multimedia/debug modules, rotated per-run via RDTSC), overwrites its `.text` with shellcode, and registers a synthetic `RUNTIME_FUNCTION` via `RtlAddFunctionTable`. Defeats Elastic 8.11+ kernel ETW callstack validation that flags stomped regions with no `.pdata` entry. No NTFS transaction → Defender MpFilter has no hook here |
+| **Ghostly Hollowing** | Tier-2 fallback. Copies sacrificial DLL to `%TEMP%`, opens with `FILE_FLAG_DELETE_ON_CLOSE`, writes XOR-encrypted shellcode at `.text` raw offset, creates `SEC_IMAGE` section, closes the file (disk file gone — section keeps the kernel `FILE_OBJECT` alive), maps + decrypts in memory. Bypasses Defender's MpFilter transaction-aware scanner entirely (Maldev Academy 2024 technique) |
+| **Phantom DLL Hollowing (XOR-in-transaction)** | Tier-3 fallback. NTFS-transacted copy of a sacrificial DLL with the shellcode bytes XOR-encrypted before write (per-build 16-byte key); after `NtCreateSection(SEC_IMAGE)` + map, the loader flips RX → RW, XOR-decrypts in place, flips back. Defender's MpFilter transaction-aware scanner sees only encrypted bytes in the in-flight view |
+| **Anti-emulation prologue** | RDTSC determinism check + CPUID `0x40000000` hypervisor brand check + API hammering to exhaust mpengine's ~200ms wall-clock budget. Bails before any allocation/decryption if running inside Defender's emulator |
 | **Poison Fiber Kick-off** | Primary execution path is `ConvertThreadToFiber` + `SwitchToFiber` on the main thread — no new OS thread, so `PsSetCreateThreadNotifyRoutine` never fires. Thread-pool fallback if fiber APIs unavailable |
 | **Multi-module Call Stack Spoofing** | `FF D3` (call rbx) gadgets pooled from ntdll / kernel32 / kernelbase (up to 64); per-run RDTSC pick defeats "single return-address frequency" heuristics. All frames resolve to legitimate modules |
 | **Wait:UserRequest keep-alive** | Alertable `NtWaitForSingleObject(NtCurrentProcess)` instead of `NtDelayExecution`, so the thread's `WaitReason` reads `UserRequest` — beats Hunt-Sleeping-Beacons / BeaconHunter fingerprints |
@@ -180,6 +182,8 @@ Main()
  ├─ InitializeWinApis          FindLoadedModuleW → kernel32 → JOAAT resolve
  ├─ BlindDllNotifications      unlink LdrRegisterDllNotification entries
  ├─ ShufflePreloadLibraries    Fisher-Yates (RDTSC) amsi/wininet/ktmw32
+ ├─ AntiAnalysis               PEB.BeingDebugged · NtGlobalFlag · NumberOfProcessors · RDTSC
+ ├─ AntiEmulation              RDTSC variance · CPUID hv brand · mpengine budget burn
  ├─ PatchlessAmsiEtw           DR0 = EtwEventWrite
  │                              DR1 = AmsiScanBuffer
  ├─ BruteForceDecryption       recover Chaskey key
@@ -187,12 +191,13 @@ Main()
  ├─ ChaskeyCtrDecrypt          in-place decryption
  ├─ DecompressPayload          LZNT1 via RtlDecompressBuffer
  │
- ├─ ┌ PhantomDllHollow ─────── NTFS txn → SEC_IMAGE → rollback
- ├─ │ ModuleStomp ──────────── overwrite .text + RtlAddFunctionTable
+ ├─ ┌ ModuleStomp ──────────── allowlist + overwrite .text + RtlAddFunctionTable
+ ├─ │ GhostlyHollow ────────── DELETE_ON_CLOSE → SEC_IMAGE → file unlinked
+ ├─ │ PhantomDllHollow ─────── NTFS txn + XOR-encrypted .text → SEC_IMAGE → rollback
  ├─ └ NtAllocateVirtualMemory  private RW → RX  (last resort)
  │
  ├─ CleanupEvasion             wipe VEH · DR regs · keys · URLs
- ├─ CollectCallGadgets         pool FF D3 from ntdll/kernel32/kernelbase
+ ├─ CollectCallGadgets         pool FF D3 from ntdll/k32/kbase/dbgcore/dbghelp/dsdmo
  ├─ GetRandomCallGadget        RDTSC pick
  ├─ SetSpoofTarget             configure ASM trampoline
  ├─ [opt] BuildSyntheticStack  1 MB fake stack · 3 ntdll/k32 anchors
