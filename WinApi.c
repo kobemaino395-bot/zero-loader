@@ -10,7 +10,29 @@
 // -----------------------------------------------
 #ifdef DEBUG
 static VOID WriteToLog(IN LPCSTR szMsg, IN DWORD dwLen) {
-    HANDLE hFile = CreateFileA("debug.log", FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    // Build absolute path "<exedir>\debug.log" once; avoids CWD mismatch in elevated UAC processes.
+    static CHAR szLogPath[MAX_PATH + 16] = {0};
+    if (szLogPath[0] == '\0') {
+        DWORD n = GetModuleFileNameA(NULL, szLogPath, MAX_PATH);
+        if (n == 0) {
+            szLogPath[0] = 'd'; szLogPath[1] = 'e'; szLogPath[2] = 'b';
+            szLogPath[3] = 'u'; szLogPath[4] = 'g'; szLogPath[5] = '.';
+            szLogPath[6] = 'l'; szLogPath[7] = 'o'; szLogPath[8] = 'g';
+            szLogPath[9] = '\0';
+        } else {
+            INT i;
+            for (i = (INT)n - 1; i >= 0; i--) {
+                if (szLogPath[i] == '\\') {
+                    szLogPath[i+1]  = 'd'; szLogPath[i+2]  = 'e'; szLogPath[i+3]  = 'b';
+                    szLogPath[i+4]  = 'u'; szLogPath[i+5]  = 'g'; szLogPath[i+6]  = '.';
+                    szLogPath[i+7]  = 'l'; szLogPath[i+8]  = 'o'; szLogPath[i+9]  = 'g';
+                    szLogPath[i+10] = '\0';
+                    break;
+                }
+            }
+        }
+    }
+    HANDLE hFile = CreateFileA(szLogPath, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         DWORD dwWritten = 0;
         WriteFile(hFile, szMsg, dwLen, &dwWritten, NULL);
@@ -38,6 +60,30 @@ VOID DbgLogStatus(IN LPCSTR msg, IN NTSTATUS status) {
     }
     *p = 0;
     WriteToLog(hex, (DWORD)(p - hex));
+    WriteToLog("\r\n", 2);
+}
+
+// Write label + DWORD value as "0x" + 8 hex digits, then newline.
+// Use for GetLastError() / HRESULT / status codes.
+VOID DbgLogHex(IN LPCSTR label, IN DWORD value) {
+    DWORD len = (DWORD)StrLenA(label);
+    WriteToLog(label, len);
+    char hex[12] = "0x";
+    char* p = hex + 2;
+    for (int i = 7; i >= 0; i--) {
+        int nibble = (value >> (i * 4)) & 0xF;
+        *p++ = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+    }
+    WriteToLog(hex, (DWORD)(p - hex));
+    WriteToLog("\r\n", 2);
+}
+
+// Write label + string value, then newline.
+// Use for URLs, hostnames, paths, etc.
+VOID DbgLogStr(IN LPCSTR label, IN LPCSTR value) {
+    DWORD len = (DWORD)StrLenA(label);
+    WriteToLog(label, len);
+    if (value) WriteToLog(value, (DWORD)StrLenA(value));
     WriteToLog("\r\n", 2);
 }
 #endif

