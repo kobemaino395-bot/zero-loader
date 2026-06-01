@@ -676,12 +676,13 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
     if (!p) return;
     document.querySelectorAll(".profile-popup-overlay").forEach(x => x.remove());
     // ensure lookup arrays are populated
-    if (!_encryptHistory.length) try { _encryptHistory = await fetch("/api/encrypt/history").then(r => r.json()); } catch(_) {}
-    if (!_donutJobs.length)     try { _donutJobs     = await fetch("/api/donut/jobs").then(r => r.json()); }       catch(_) {}
-    if (!_wallets.length)       try { _wallets        = await fetch("/api/wallets").then(r => r.json()); }          catch(_) {}
-    if (!_dlls.length)          try { _dlls           = await fetch("/api/dlls").then(r => r.json()); }             catch(_) {}
-    if (!_exes.length)          try { _exes           = await fetch("/api/exes").then(r => r.json()); }             catch(_) {}
-    if (!_binds.length)         try { _binds          = await fetch("/api/binds").then(r => r.json()); }            catch(_) {}
+    const _safeJson = async (url) => { try { const r = await fetch(url); if (!r.ok || r.headers.get("content-type")?.includes("text/html")) return []; return r.json(); } catch(_) { return []; } };
+    if (!_encryptHistory.length) _encryptHistory = await _safeJson("/api/encrypt/history");
+    if (!_donutJobs.length)      _donutJobs      = await _safeJson("/api/donut/jobs");
+    if (!_wallets.length)        _wallets        = await _safeJson("/api/wallets");
+    if (!_dlls.length)           _dlls           = await _safeJson("/api/dlls");
+    if (!_exes.length)           _exes           = await _safeJson("/api/exes");
+    if (!_binds.length)          _binds          = await _safeJson("/api/binds");
     const rows = [];
     if (p.type === "build" || p.mode) {
       rows.push(["Mode", p.mode || "exe"]);

@@ -2267,10 +2267,7 @@ def _tor_read_log(n: int = 150) -> list:
 @app.route("/api/tor/status")
 def api_tor_status():
     running = _tor_running()
-    pid = None
-    if running:
-        with _tor_lock:
-            pid = (_tor_proc.pid if _tor_proc and _tor_proc.poll() is None else _tor_pid)
+    pid = (_tor_proc.pid if _tor_proc and _tor_proc.poll() is None else _tor_pid) if running else None
     torrc = _tor_read_torrc()
     svcs  = _tor_parse_services(torrc)
     return jsonify({
