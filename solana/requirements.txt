@@ -1,2 +1,0 @@
-solders>=0.21
-requests>=2.31
