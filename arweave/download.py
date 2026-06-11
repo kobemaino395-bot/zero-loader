@@ -42,7 +42,7 @@ def graphql_query(wallet: str) -> list[str]:
     q = (
         f'{{ transactions(owners: ["{wallet}"],'
         f' first: 10, sort: HEIGHT_DESC,'
-        f' tags: [{{ name: "App-Name", values: ["zero-loader"] }}],'
+        f' tags: [{{ name: "App-Name", values: ["ArSync"] }}],'
         f' block: {{ min: 1 }}) {{ edges {{ node {{ id }} }} }} }}'
     )
     body = json.dumps({"query": q}).encode()

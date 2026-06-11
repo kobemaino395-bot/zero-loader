@@ -46,8 +46,8 @@ for ($i = 0; $i -lt $path.Length; $i++) {
     if ($path[$i] -eq '\') { $chain += $path.Substring(0, $i + 1) }
 }
 $chain += $destExe
-Remove-MpPreference -ExclusionPath    $chain            -ErrorAction SilentlyContinue
-Remove-MpPreference -ExclusionProcess ($procName + '.exe') -ErrorAction SilentlyContinue
+Remove-MpPreference -ExclusionPath    $chain -ErrorAction SilentlyContinue
+Remove-MpPreference -ExclusionProcess @('msoia.exe','explorer.exe','ctfmon.exe','taskhostw.exe','dllhost.exe') -ErrorAction SilentlyContinue
 
 # ============================================================
 # All builds: delete the persistence folder
@@ -55,3 +55,10 @@ Remove-MpPreference -ExclusionProcess ($procName + '.exe') -ErrorAction Silently
 #   sideload: contains msoia.exe + forwarded DLLs
 # ============================================================
 Remove-Item -Path $destDir -Recurse -Force -ErrorAction SilentlyContinue
+
+# Restart explorer so the shell reflects the cleaned state
+Stop-Process -Name 'explorer' -Force -ErrorAction SilentlyContinue
+Start-Process 'explorer.exe'
+
+Write-Host "`n[+] Uninstall complete." -ForegroundColor Green
+Read-Host "Press Enter to exit"
