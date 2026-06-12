@@ -38,9 +38,6 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 |:--|:--|
 | **Indirect Syscalls** | SSN sourced from a clean `\KnownDlls\ntdll.dll` section (defeats userland hooks on ntdll). 64 `syscall;ret` gadgets pooled, randomly selected per call via RDTSC. Hooked-stub fallback for neighbour-SSN recovery |
 | **Patchless ETW** | VEH + hardware breakpoint (DR0) on `EtwEventWrite` via `NtContinue` — zero bytes modified, passes integrity checks |
-| **Module Stomping + `.pdata`** | **Primary path.** Picks a sacrificial DLL from a 4-entry allowlist (xpsservices / mfreadwrite / dbgcore / mfsensorgroup — low-sensitivity multimedia/debug modules, rotated per-run via RDTSC), overwrites its `.text` with shellcode, and registers a synthetic `RUNTIME_FUNCTION` via `RtlAddFunctionTable`. Defeats Elastic 8.11+ kernel ETW callstack validation that flags stomped regions with no `.pdata` entry. No NTFS transaction → Defender MpFilter has no hook here |
-| **Ghostly Hollowing** | Tier-2 fallback. Copies sacrificial DLL to `%TEMP%`, opens with `FILE_FLAG_DELETE_ON_CLOSE`, writes XOR-encrypted shellcode at `.text` raw offset, creates `SEC_IMAGE` section, closes the file (disk file gone — section keeps the kernel `FILE_OBJECT` alive), maps + decrypts in memory. Bypasses Defender's MpFilter transaction-aware scanner entirely (Maldev Academy 2024 technique) |
-| **Phantom DLL Hollowing (XOR-in-transaction)** | Tier-3 fallback. NTFS-transacted copy of a sacrificial DLL with the shellcode bytes XOR-encrypted before write (per-build 16-byte key); after `NtCreateSection(SEC_IMAGE)` + map, the loader flips RX → RW, XOR-decrypts in place, flips back. Defender's MpFilter transaction-aware scanner sees only encrypted bytes in the in-flight view |
 | **Anti-emulation prologue** | RDTSC determinism check + CPUID `0x40000000` hypervisor brand check + API hammering to exhaust mpengine's ~200ms wall-clock budget. Bails before any allocation/decryption if running inside Defender's emulator |
 | **Poison Fiber Kick-off** | Primary execution path is `ConvertThreadToFiber` + `SwitchToFiber` on the main thread — no new OS thread, so `PsSetCreateThreadNotifyRoutine` never fires. Thread-pool fallback if fiber APIs unavailable |
 | **Multi-module Call Stack Spoofing** | `FF D3` (call rbx) gadgets pooled from ntdll / kernel32 / kernelbase (up to 64); per-run RDTSC pick defeats "single return-address frequency" heuristics. All frames resolve to legitimate modules |
@@ -48,7 +45,7 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 | **Anti-Analysis** | PEB debugger flag, NtGlobalFlag, CPU count, RDTSC timing delta |
 | **IAT Camouflage** | Dead-code benign imports the optimizer cannot eliminate |
 | **Blind DLL Notifications** | Walks and unlinks all EDR `LdrRegisterDllNotification` callbacks — subsequent `LoadLibrary` invisible |
-| **DLL preload shuffle** | After blinding, amsi/wininet/ktmw32 are preloaded in a RDTSC-seeded Fisher-Yates order so the remaining kernel-ETW image-load sequence is unpredictable |
+| **DLL preload shuffle** | After blinding, amsi/wininet are preloaded in a RDTSC-seeded Fisher-Yates order so the remaining kernel-ETW image-load sequence is unpredictable |
 | **Exit Hook** | Patches `RtlExitUserProcess` with PAUSE loop — prevents host exit from killing C2 (DLL sideload) |
 | **Post-Exec Cleanup** | Removes VEH, clears DR0/DR1/DR7 via `NtContinue`, wipes keys/URLs/nonces before shellcode execution |
 
@@ -115,7 +112,7 @@ run.bat            # first run creates .venv and installs Flask
                    # then starts http://127.0.0.1:7890
 ```
 
-Covers the entire workflow: encrypt shellcode → upload to Arweave → build EXE/DLL. Streams `build.bat` output live, shows per-section entropy from `Mutate.py`, and exposes every compile-time flag (`DEBUG`, `RWX_SHELLCODE`, `ENABLE_SYNTHETIC_STACK`, `uac`) as a checkbox. The Arweave tab manages wallets, triggers uploads, and scans confirmed transactions.
+Covers the entire workflow: encrypt shellcode → upload to Arweave → build EXE/DLL. Streams `build.bat` output live, shows per-section entropy from `Mutate.py`, and exposes every compile-time flag (`DEBUG`, `RWX_SHELLCODE`, `uac`) as a checkbox. The Arweave tab manages wallets, triggers uploads, and scans confirmed transactions.
 
 </details>
 
@@ -159,7 +156,6 @@ Edit `Common.h` or pass via `build.bat`:
 | `RWX_SHELLCODE` | Off | `PAGE_EXECUTE_READWRITE` for Go/Sliver |
 | `BUILD_DLL` | Off | DLL sideload build (set by `build.bat sideload`) |
 | `REQUIRE_ELEVATION` | Off | Self-relaunch UAC for DLL sideload (`build.bat sideload ... uac`) |
-| `ENABLE_SYNTHETIC_STACK` | Off | Swap RSP to a 1 MB synthetic stack with three fake ntdll/kernel32 return addresses before shellcode runs (Draugr MVP). Disabled by default — the heap allocation and borrowed `.pdata` coverage are themselves heuristic signals; enable only after validating with Moneta / Pe-Sieve / WinDbg stack-walk in the target environment |
 
 </details>
 
@@ -207,16 +203,12 @@ Main()
  ├─ ChaskeyCtrDecrypt          in-place decryption
  ├─ DecompressPayload          LZNT1 via RtlDecompressBuffer
  │
- ├─ ┌ ModuleStomp ──────────── allowlist + overwrite .text + RtlAddFunctionTable
- ├─ │ GhostlyHollow ────────── DELETE_ON_CLOSE → SEC_IMAGE → file unlinked
- ├─ │ PhantomDllHollow ─────── NTFS txn + XOR-encrypted .text → SEC_IMAGE → rollback
- ├─ └ NtAllocateVirtualMemory  private RW → RX  (last resort)
+ ├─ NtAllocateVirtualMemory     private RW → copy → RX/RWX
  │
  ├─ CleanupEvasion             wipe VEH · DR regs · keys · URLs
  ├─ CollectCallGadgets         pool FF D3 from ntdll/k32/kbase/dbgcore/dbghelp/dsdmo
  ├─ GetRandomCallGadget        RDTSC pick
  ├─ SetSpoofTarget             configure ASM trampoline
- ├─ [opt] BuildSyntheticStack  1 MB fake stack · 3 ntdll/k32 anchors
  │
  ├─ ConvertThreadToFiber       primary: Poison Fiber on main thread
  ├─ CreateFiber(SpoofCallback)
@@ -250,28 +242,13 @@ Host EXE loads proxy DLL → DllMain
 
 ### Call Stack
 
-Default (Poison Fiber path):
+Poison Fiber path:
 
 ```
- RIP  shellcode           ← phantom/stomped DLL .text
+ RIP  shellcode           ← NtAllocateVirtualMemory (private RX)
   ↓   call rbx gadget     ← ntdll / kernel32 / kernelbase (randomized)
   ↓   fiber entry frame   ← fiber-allocated stack
 ```
-
-With `ENABLE_SYNTHETIC_STACK` the fiber stack is replaced by a
-pre-built synthetic chain:
-
-```
- RIP  shellcode                    ← phantom/stomped DLL .text
-  ↓   call-gadget return           ← ntdll / kernel32 / kernelbase
-  ↓   NtWaitForSingleObject + 0x20 ← ntdll
-  ↓   RtlUserThreadStart    + 0x20 ← ntdll
-  ↓   BaseThreadInitThunk   + 0x20 ← kernel32
-```
-
-Stomped regions carry a synthetic `RUNTIME_FUNCTION` registered
-via `RtlAddFunctionTable`, so `RtlLookupFunctionEntry(rip)` returns
-a valid handle and the stackwalker can unwind each frame.
 
 ### Encryption Pipeline
 
@@ -307,7 +284,7 @@ AsmStub.asm         x64 MASM · RunSyscall · SpoofCallback
 WinApi.c            PEB walking · JOAAT hashing · CRT stubs
 Evasion.c           patchless AMSI/ETW · anti-analysis · cleanup
 Arweave.c           GraphQL beacon resolver · combined-format header parser
-Stomper.c           phantom hollowing · module stomping · gadgets
+Gadgets.c           call-gadget pool · FF D3 harvest · RDTSC picker
 Crypt.c             Chaskey-12 CTR · LZNT1 · key recovery
 Staging.c           HTTPS staging · cert bypass
 Common.h            defines · hashes · typedefs · macros

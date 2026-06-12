@@ -596,7 +596,6 @@ $("#form-build").addEventListener("submit", async (e) => {
     uac:                form.uac.checked,
     rwx:                form.rwx.checked,
     debug:              form.debug.checked,
-    synthetic:          form.synthetic.checked,
     exe_output_name:    $("#bld-exe-name")?.value.trim()   || "",
     encrypt_history_id: $("#bld-payload-sel")?.value       || "",
     dll_id:             $("#sl-dll-sel")?.value            || "",
@@ -689,7 +688,6 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
       rows.push(["UAC", p.uac ? "yes" : "no"]);
       rows.push(["RWX", p.rwx ? "yes" : "no"]);
       rows.push(["Debug", p.debug ? "yes" : "no"]);
-      rows.push(["Synthetic stack", p.synthetic ? "yes" : "no"]);
       if (p.exe_output_name) rows.push(["Output", p.exe_output_name]);
       if (p.dll_id)  { const d = _dlls.find(x => x.id === p.dll_id);  rows.push(["DLL",       d ? d.name : p.dll_id]); }
       if (p.exe_id)  { const x = _exes.find(x => x.id === p.exe_id);  rows.push(["Host EXE",  x ? x.name : p.exe_id]); }
@@ -782,7 +780,6 @@ function loadBldProfile(id) {
   $("#bld-uac").checked   = !!p.uac;
   $("#bld-rwx").checked   = !!p.rwx;
   $("#bld-debug").checked = !!p.debug;
-  $("#bld-syn").checked   = !!p.synthetic;
   const dllSel = $("#sl-dll-sel");
   if (dllSel && p.dll_id) { dllSel.value = p.dll_id; if (dllSel.value !== p.dll_id) dllSel.value = ""; }
   const exeSel = $("#sl-exe-sel");
@@ -839,7 +836,6 @@ function collectBuildData() {
     uac:                $("#bld-uac")?.checked   || false,
     rwx:                $("#bld-rwx")?.checked   || false,
     debug:              $("#bld-debug")?.checked || false,
-    synthetic:          $("#bld-syn")?.checked   || false,
   };
 }
 
@@ -1082,7 +1078,7 @@ function renderBuildHistory() {
     el.className = "hist-item";
     const dot     = j.ok ? `<span class="ji-dot dot-ok">●</span>` : `<span class="ji-dot dot-bad">○</span>`;
     const dateStr = fmtTimeShort(j.created_at);
-    const flags   = [j.mode, j.uac ? "uac" : "", j.rwx ? "rwx" : "", j.debug ? "dbg" : "", j.synthetic ? "syn" : ""]
+    const flags   = [j.mode, j.uac ? "uac" : "", j.rwx ? "rwx" : "", j.debug ? "dbg" : ""]
                       .filter(Boolean).join(" · ");
 
     let dls = `<a class="btn-xs" href="/api/build/history/${j.id}/download/output" title="Download build log">↓ log</a>`;
@@ -1299,6 +1295,7 @@ function showWalletPanel(w) {
   none.classList.add("hidden"); panel.classList.remove("hidden");
   $("#wp-name").textContent = w.name;
   $("#wp-addr").textContent = w.address;
+  $("#wp-addr").href = `https://viewblock.io/arweave/address/${w.address}`;
   $("#btn-wallet-dl-kp").href = `/api/wallets/${w.id}/keypair`;
   $("#wallet-rename-row").classList.add("hidden");
   // clear upload/lookup outputs when switching wallets

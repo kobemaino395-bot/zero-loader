@@ -82,7 +82,7 @@
 
             <div class="actions">
               <button type="submit" class="primary">Encrypt</button>
-              <span class="hint">New key, nonce, XOR rotation, and placement key on every run.</span>
+              <span class="hint">New key, nonce, and XOR rotation on every run.</span>
             </div>
           </form>
 
@@ -125,7 +125,6 @@
               <label class="check"><input type="checkbox" name="uac" id="bld-uac">       <span>UAC — <code>/MANIFESTUAC</code> (EXE) or self-elevation (DLL)</span></label>
               <label class="check"><input type="checkbox" name="rwx" id="bld-rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
               <label class="check"><input type="checkbox" name="debug" id="bld-debug">   <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
-              <label class="check"><input type="checkbox" name="synthetic" id="bld-syn"> <span>ENABLE_SYNTHETIC_STACK — Draugr RSP swap (opt-in)</span></label>
             </fieldset>
 
             <!-- Payload.h source -->
@@ -422,7 +421,7 @@
           <div>
             <div class="wallet-panel-name" id="wp-name"></div>
             <div class="wallet-addr-row">
-              <div class="wallet-panel-addr" id="wp-addr"></div>
+              <a class="wallet-panel-addr" id="wp-addr" target="_blank" rel="noopener"></a>
               <button class="btn-xs" id="btn-copy-addr" title="Copy address">Copy</button>
             </div>
             <div class="wallet-balance-row">
