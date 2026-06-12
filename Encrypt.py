@@ -313,7 +313,7 @@ def main():
         from ShellcodeWrap import wrap_shellcode
         original_size = len(shellcode)
         shellcode = wrap_shellcode(shellcode)
-        print(f"[+] Wrapped: {original_size:,} → {len(shellcode):,} bytes (XOR decode stub prepended)")
+        print(f"[+] Wrapped: {original_size:,} -> {len(shellcode):,} bytes (XOR decode stub prepended)")
         print(f"[!] Build with RWX_SHELLCODE — in-place decode requires writable+exec pages")
 
     print(f"[*] Shellcode: {len(shellcode)} bytes ({len(shellcode)/1024/1024:.2f} MB)")

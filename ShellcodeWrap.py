@@ -84,7 +84,7 @@ def main():
         f.write(wrapped)
 
     overhead = len(wrapped) - len(original)
-    print(f"[+] Wrapped: {len(original):,} → {len(wrapped):,} bytes (+{overhead} bytes stub overhead)")
+    print(f"[+] Wrapped: {len(original):,} -> {len(wrapped):,} bytes (+{overhead} bytes stub overhead)")
     print(f"[+] Output: {out_path}")
     print(f"[!] Build with RWX_SHELLCODE — in-place decode requires writable+exec pages")
 
