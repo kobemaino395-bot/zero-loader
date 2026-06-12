@@ -379,9 +379,13 @@ def api_encrypt():
         if wmeta:
             wallet_address = wmeta.get("address", "")
 
+    wrap = request.form.get("wrap") == "1"
+
     argv = [sys.executable, "Encrypt.py", str(sc_path)]
     if wallet_address and _ARW_ADDR_RE.match(wallet_address):
         argv += ["--wallet", wallet_address]
+    if wrap:
+        argv += ["--wrap"]
 
     result = _run(argv)
 
@@ -407,6 +411,7 @@ def api_encrypt():
         "shellcode_job_id":    shellcode_job_id,
         "donut_label":         donut_label,
         "donut_original_name": donut_original_name,
+        "wrapped":             wrap,
         "dat_name":            dat_name,
         "dat_size":            0,
         "payload_h_size":      0,
@@ -976,6 +981,7 @@ def api_profiles_encrypt_create():
         "name":             (data.get("name") or "Unnamed").strip(),
         "shellcode_job_id": data.get("shellcode_job_id", ""),
         "wallet_id":        data.get("wallet_id", ""),
+        "wrap":             bool(data.get("wrap")),
         "created_at":       int(time.time()),
     }
     profiles = _load_profiles()
@@ -1033,6 +1039,7 @@ def api_profiles_update(pid):
         update.update({
             "shellcode_job_id": data.get("shellcode_job_id", existing.get("shellcode_job_id", "")),
             "wallet_id":        data.get("wallet_id",        existing.get("wallet_id", "")),
+            "wrap":             bool(data.get("wrap")),
         })
     else:
         update.update({
@@ -1413,7 +1420,7 @@ def api_wallets_lookup(wid):
             ' first: 10, sort: HEIGHT_DESC,'
             ' tags: [{ name: "App-Name", values: ["ArSync"] }],'
             ' block: { min: 1 }) {'
-            ' edges { node { id block { height } tags { name value } } } } }'
+            ' edges { node { id data { size } block { height } tags { name value } } } } }'
         )
     }).encode("utf-8")
 
@@ -1444,9 +1451,10 @@ def api_wallets_lookup(wid):
         if not _ARW_ADDR_RE.match(tx_id):
             continue
         block_height = (node.get("block") or {}).get("height")
+        data_size    = (node.get("data") or {}).get("size")
         tags = {t["name"]: t["value"] for t in node.get("tags", []) if "name" in t and "value" in t}
         url = f"https://arweave.net/{tx_id}"
-        entry: dict = {"tx_id": tx_id, "url": url, "block": block_height, "tags": tags, "payload_v2": False, "meta": None, "error": None}
+        entry: dict = {"tx_id": tx_id, "url": url, "block": block_height, "data_size": data_size, "tags": tags, "payload_v2": False, "meta": None, "error": None}
         _COMBINED_HDR_RE = re.compile(rb'^[0-9a-f]{32}\|[0-9a-f]{24}\|\d+\|[01]\|')
         try:
             with urllib.request.urlopen(url, timeout=15) as tx_resp:
