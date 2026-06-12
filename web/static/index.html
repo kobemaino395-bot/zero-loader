@@ -80,14 +80,6 @@
               <span style="font-size:11px;color:var(--text-mute)">Wallet address is embedded in <code>Payload.h</code> — the C loader uses it to find your transactions on Arweave at runtime.</span>
             </div>
 
-            <fieldset class="field">
-              <legend>Options</legend>
-              <label class="check" id="field-wrap-opt">
-                <input type="checkbox" name="wrap" id="enc-wrap">
-                <span>Wrap shellcode — prepend XOR decode stub (defeats Bearfoos.a!ml · requires <code>RWX_SHELLCODE</code>)</span>
-              </label>
-            </fieldset>
-
             <div class="actions">
               <button type="submit" class="primary">Encrypt</button>
               <span class="hint">New key, nonce, and XOR rotation on every run.</span>

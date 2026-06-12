@@ -297,8 +297,6 @@ $("#form-encrypt").addEventListener("submit", async (e) => {
   const walletId = $("#enc-wallet-id").value;
   if (walletId) fd.append("wallet_id", walletId);
 
-  fd.append("wrap", $("#enc-wrap")?.checked ? "1" : "0");
-
   try {
     const r = await fetch("/api/encrypt", { method: "POST", body: fd });
     const j = await r.json();
@@ -664,7 +662,7 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
     li.innerHTML = `
       <div class="mi-info" style="cursor:pointer" data-show="${p.id}">
         <div class="mi-name">${p.name}</div>
-        <div class="mi-meta" style="font-size:10px;color:var(--text-mute)">${_profileMeta(p)}</div>
+        <div class="mi-meta" style="font-size:10px;color:var(--text-mute)"><span style="font-family:monospace;opacity:.55">#${p.id}</span> · ${_profileMeta(p)}</div>
       </div>
       <div class="mi-btns">
         <button class="btn-sm primary" data-load="${p.id}">Load</button>
@@ -702,7 +700,6 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
     } else {
       if (p.shellcode_job_id) { const j = _donutJobs.find(x => x.id === p.shellcode_job_id); rows.push(["Shellcode", j ? (j.label || j.id.slice(0,8)) : p.shellcode_job_id.slice(0,8)]); }
       if (p.wallet_id) { const w = _wallets.find(x => x.id === p.wallet_id); rows.push(["Wallet", w ? w.name : p.wallet_id.slice(0,12) + "…"]); }
-      if (p.wrap) rows.push(["Wrap", "yes"]);
     }
     const overlay = document.createElement("div");
     overlay.className = "profile-popup-overlay";
@@ -771,7 +768,6 @@ function loadEncProfile(id) {
       wWrap.querySelectorAll(".cdd-item").forEach(i => i.classList.remove("cdd-selected"));
     }
   }
-  if ($("#enc-wrap")) $("#enc-wrap").checked = !!p.wrap;
   $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "encrypt"));
   $$(".panel").forEach(pp => pp.classList.toggle("active", pp.id === "panel-encrypt"));
   _openEncSaveRow();
@@ -827,7 +823,6 @@ function collectEncryptData() {
   return {
     shellcode_job_id: $("#enc-sc-job")?.value || "",
     wallet_id:        $("#enc-wallet-id")?.value || "",
-    wrap:             $("#enc-wrap")?.checked || false,
   };
 }
 function collectBuildData() {
@@ -962,7 +957,6 @@ function renderEncryptHistory() {
     const donutBadge = j.donut_label
       ? `<span class="ji-label-badge">${j.donut_label}</span>`
       : "";
-    const wrapBadge = j.wrapped ? `<span class="ji-label-badge" title="XOR decode stub prepended">wrapped</span>` : "";
 
     // download links
     let dls = `<a class="btn-xs" href="/api/encrypt/history/${j.id}/download/payload_h">↓ Payload.h</a>`;
@@ -990,7 +984,7 @@ function renderEncryptHistory() {
       </div>
       <div class="hist-meta">
         <span class="ji-id">#${j.id}</span>
-        ${donutBadge}${wrapBadge}
+        ${donutBadge}
         <span>${j.dat_size ? fmtSize(j.dat_size) + " enc" : ""}</span>
         ${walletBadge}
         ${txBadge}

