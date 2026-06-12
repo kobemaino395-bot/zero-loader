@@ -20,6 +20,9 @@ import json
 import os
 import re
 import sys
+import tempfile
+
+import requests
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -31,24 +34,91 @@ except ImportError:
 _COMBINED_HDR_RE = re.compile(rb'^[0-9a-f]{32}\|[0-9a-f]{24}\|\d+\|[01]\|')
 _TX_ID_RE        = re.compile(r'^[A-Za-z0-9_-]{43}$')
 
+# Arweave gateways reject inline data bodies above ~100 KB.
+# Larger files must be split into 256 KB chunks via the /chunk endpoint.
+_CHUNK_THRESHOLD = 100 * 1024
+_TX_HEADERS      = {"Content-Type": "application/json", "Accept": "text/plain"}
 
-def _upload(wallet: Wallet, data: bytes, extra_tags: dict | None = None) -> str:
-    tx = Transaction(wallet, data=data)
+
+class _BytesEncoder(json.JSONEncoder):
+    """base64url_encode() returns bytes; JSON requires strings."""
+    def default(self, obj):
+        if isinstance(obj, bytes):
+            return obj.decode()
+        return super().default(obj)
+
+
+def _add_tags(tx: Transaction, extra_tags: dict | None) -> None:
     tx.add_tag("Content-Type", "application/octet-stream")
     tx.add_tag("App-Name",     "ArSync")
     tx.add_tag("Content-Class", "bundle")
     if extra_tags:
         for k, v in extra_tags.items():
             tx.add_tag(k, v)
+
+
+def _upload(wallet: Wallet, data: bytes, extra_tags: dict | None = None, log=None) -> str:
+    if len(data) > _CHUNK_THRESHOLD:
+        return _upload_chunked(wallet, data, extra_tags, log)
+
+    tx = Transaction(wallet, data=data)
+    _add_tags(tx, extra_tags)
     tx.sign()
-    resp = tx.send()
-    if hasattr(resp, "status_code") and resp.status_code not in (200, 208):
-        try:
-            detail = resp.text[:200]
-        except Exception:
-            detail = str(resp)
-        raise RuntimeError(f"Node rejected TX (HTTP {resp.status_code}): {detail}")
+
+    # tx.send() returns self.last_tx (a string anchor), not the HTTP response.
+    # Call requests directly so we can check the actual status code.
+    resp = requests.post(f"{tx.api_url}/tx", data=tx.json_data, headers=_TX_HEADERS)
+    if resp.status_code not in (200, 208):
+        raise RuntimeError(f"Node rejected TX (HTTP {resp.status_code}): {resp.text[:200]}")
     return tx.id
+
+
+def _upload_chunked(wallet: Wallet, data: bytes, extra_tags: dict | None, log) -> str:
+    """Post the transaction header to /tx then upload each 256 KB chunk to /chunk."""
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".enc")
+    try:
+        os.write(tmp_fd, data)
+        os.close(tmp_fd)
+
+        with open(tmp_path, "rb") as fh:
+            tx = Transaction(wallet, file_handler=fh, file_path=tmp_path)
+            _add_tags(tx, extra_tags)
+            tx.sign()  # internally calls prepare_chunks() for the file_handler path
+
+            # POST transaction header — data field must be empty for chunked format
+            tx_dict = tx.to_dict()
+            tx_dict["data"] = ""
+            resp = requests.post(f"{tx.api_url}/tx", data=json.dumps(tx_dict, cls=_BytesEncoder), headers=_TX_HEADERS)
+            if resp.status_code not in (200, 202, 208):
+                raise RuntimeError(
+                    f"TX header rejected (HTTP {resp.status_code}): {resp.text[:200]}"
+                )
+
+            chunks = tx.chunks.get("chunks", [])
+            n = len(chunks)
+            if log:
+                log(f"[*] Chunked upload: {n} chunks ({len(data) / 1024 / 1024:.1f} MB) …")
+
+            for i in range(n):
+                chunk = tx.get_chunk(i)
+                resp = requests.post(
+                    f"{tx.api_url}/chunk",
+                    data=json.dumps(chunk, cls=_BytesEncoder),
+                    headers=_TX_HEADERS,
+                )
+                if resp.status_code not in (200, 202, 208):
+                    raise RuntimeError(
+                        f"Chunk {i + 1}/{n} rejected (HTTP {resp.status_code}): {resp.text[:200]}"
+                    )
+                if log and (n <= 20 or (i + 1) % max(1, n // 10) == 0 or i + 1 == n):
+                    log(f"[*]   {i + 1}/{n} chunks ({(i + 1) * 100 // n}%)")
+
+            return tx.id
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def publish(data_enc_path: str, wallet_path: str, json_mode: bool = False) -> dict:
@@ -81,7 +151,7 @@ def publish(data_enc_path: str, wallet_path: str, json_mode: bool = False) -> di
 
     log("[*] Uploading to Arweave …")
     try:
-        tx_id = _upload(wallet, data)
+        tx_id = _upload(wallet, data, log=log)
     except Exception as e:
         return {"ok": False, "error": f"Upload failed: {e}"}
 

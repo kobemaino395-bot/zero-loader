@@ -76,6 +76,141 @@ def fill_low_entropy(data, start, end):
         pos += take
 
 
+def rva_to_file_offset(data, pe_offset, rva):
+    """Convert an RVA to a raw file offset via the section table."""
+    num_sections    = struct.unpack_from('<H', data, pe_offset + 6)[0]
+    opt_header_size = struct.unpack_from('<H', data, pe_offset + 20)[0]
+    sec_table = pe_offset + 24 + opt_header_size
+    for i in range(num_sections):
+        sec   = sec_table + i * 40
+        vaddr = struct.unpack_from('<I', data, sec + 12)[0]
+        vsize = struct.unpack_from('<I', data, sec +  8)[0]
+        rptr  = struct.unpack_from('<I', data, sec + 20)[0]
+        rsz   = struct.unpack_from('<I', data, sec + 16)[0]
+        if vaddr <= rva < vaddr + max(vsize, rsz):
+            return rptr + (rva - vaddr)
+    return None
+
+
+# Export directory module names that carry a Defender static signature
+# in unsigned binaries.  The Name field is informational only — the PE
+# loader uses the DLL filename on disk for loading and forwarding resolution,
+# never IMAGE_EXPORT_DIRECTORY.Name.  Safe to overwrite with anything.
+_FLAGGED_EXPORT_DIR_NAMES = {
+    "AppVIsvSubsystems64.dll": "dxgi.dll",
+}
+
+
+def randomize_unwind_info(data, pe_offset):
+    """Randomize per-function UNWIND_INFO code bytes found via .pdata.
+    Static unwind data is identical across builds of the same source and can
+    carry a Defender static signature.  The DLL never relies on exception
+    unwinding (exit hook blocks the ExitProcess path), so corrupted unwind
+    codes are safe at runtime."""
+    num_sections = struct.unpack_from('<H', data, pe_offset + 6)[0]
+    opt_size     = struct.unpack_from('<H', data, pe_offset + 20)[0]
+    sec_tbl      = pe_offset + 24 + opt_size
+
+    sec_list = []
+    pdata_rptr = pdata_rsz = pdata_vsz = None
+
+    for i in range(num_sections):
+        s = sec_tbl + i * 40
+        name = bytes(data[s:s+8]).rstrip(b'\x00').decode('ascii', 'replace')
+        va   = struct.unpack_from('<I', data, s + 12)[0]
+        vsz  = struct.unpack_from('<I', data, s +  8)[0]
+        rsz  = struct.unpack_from('<I', data, s + 16)[0]
+        rptr = struct.unpack_from('<I', data, s + 20)[0]
+        sec_list.append((va, vsz, rptr, rsz))
+        if name == '.pdata':
+            pdata_rptr, pdata_rsz, pdata_vsz = rptr, rsz, vsz
+
+    if pdata_rptr is None:
+        return
+
+    def _rva_raw(rva):
+        for va, vsz, rptr, rsz in sec_list:
+            if va <= rva < va + max(vsz, rsz):
+                return rptr + (rva - va)
+        return None
+
+    n       = min(pdata_vsz, pdata_rsz) // 12
+    seen    = set()
+    patched = 0
+
+    for j in range(n):
+        off = pdata_rptr + j * 12
+        if off + 12 > len(data):
+            break
+        unw_rva = struct.unpack_from('<I', data, off + 8)[0]
+        if not unw_rva or unw_rva in seen:
+            continue
+        seen.add(unw_rva)
+        raw = _rva_raw(unw_rva)
+        if raw is None or raw + 4 > len(data):
+            continue
+        count = data[raw + 2]           # CountOfCodes
+        sz = (4 + count * 2 + 3) & ~3
+        if raw + sz > len(data):
+            continue
+        # Randomize the unwind-code slots (bytes 4..sz-1); keep the 4-byte
+        # UNWIND_INFO header so the version/flags fields stay formally valid.
+        for k in range(raw + 4, raw + sz):
+            data[k] = random.randint(0, 255)
+        patched += 1
+
+    if patched:
+        print(f"[+] Randomized {patched} UNWIND_INFO structures")
+
+
+def patch_export_dir_name(data, pe_offset):
+    """Overwrite a flagged export-directory module name with a benign one."""
+    opt_offset = pe_offset + 24
+    magic = struct.unpack_from('<H', data, opt_offset)[0]
+    if magic == 0x20B:    # PE32+
+        exp_rva = struct.unpack_from('<I', data, opt_offset + 112)[0]
+    elif magic == 0x10B:  # PE32
+        exp_rva = struct.unpack_from('<I', data, opt_offset +  96)[0]
+    else:
+        return
+
+    if not exp_rva:
+        return
+    exp_off = rva_to_file_offset(data, pe_offset, exp_rva)
+    if exp_off is None or exp_off + 40 > len(data):
+        return
+
+    # IMAGE_EXPORT_DIRECTORY.Name is at +12
+    name_rva = struct.unpack_from('<I', data, exp_off + 12)[0]
+    if not name_rva:
+        return
+    name_off = rva_to_file_offset(data, pe_offset, name_rva)
+    if name_off is None or name_off >= len(data):
+        return
+
+    end = name_off
+    while end < len(data) and data[end] != 0:
+        end += 1
+    orig = data[name_off:end].decode('ascii', errors='replace')
+
+    # Always sync the export directory TimeDateStamp to the COFF header value.
+    # MSVC /Brepro sets this field to 0xFFFFFFFF; Mutate.py randomizes the COFF
+    # header but previously left this field untouched, creating a detectable
+    # mismatch (randomized PE header + 0xFFFFFFFF export dir = post-processed).
+    coff_ts = struct.unpack_from('<I', data, pe_offset + 8)[0]
+    struct.pack_into('<I', data, exp_off + 4, coff_ts)
+
+    if orig not in _FLAGGED_EXPORT_DIR_NAMES:
+        return
+
+    replacement = _FLAGGED_EXPORT_DIR_NAMES[orig].encode('ascii')
+    orig_len = end - name_off
+    data[name_off:name_off + len(replacement)] = replacement
+    for i in range(len(replacement), orig_len):   # zero out remainder
+        data[name_off + i] = 0
+    print(f"[+] Export dir name: {orig!r} -> {_FLAGGED_EXPORT_DIR_NAMES[orig]!r}")
+
+
 def mutate_pe(path):
     with open(path, 'rb') as f:
         data = bytearray(f.read())
@@ -106,7 +241,15 @@ def mutate_pe(path):
     checksum_offset = opt_header + 64
     struct.pack_into('<I', data, checksum_offset, 0)
 
-    # 4. Section alignment padding: fill with low-entropy natural-language
+    # 4. Patch flagged export directory module names (informational field only)
+    patch_export_dir_name(data, pe_offset)
+
+    # 5. Randomize UNWIND_INFO unwind-code bytes so they differ on every build.
+    #    The code bytes are otherwise identical for the same source, and the
+    #    static pattern can carry a Defender signature.
+    randomize_unwind_info(data, pe_offset)
+
+    # Section alignment padding: fill with low-entropy natural-language
     #    filler. Lowers overall section entropy into the benign range
     #    (4.5-6.5 bit/byte) so static ML classifiers don't flag the binary
     #    as packed/encrypted.

