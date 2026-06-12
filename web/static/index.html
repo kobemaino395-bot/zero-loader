@@ -125,6 +125,7 @@
               <label class="check"><input type="checkbox" name="uac" id="bld-uac">       <span>UAC — <code>/MANIFESTUAC</code> (EXE) or self-elevation (DLL)</span></label>
               <label class="check"><input type="checkbox" name="rwx" id="bld-rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
               <label class="check"><input type="checkbox" name="debug" id="bld-debug">   <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
+              <label class="check hidden" id="field-inject-opt"><input type="checkbox" name="inject" id="bld-inject"> <span>ENABLE_INJECT — migrate shellcode to idle process on reboot, terminate host</span></label>
             </fieldset>
 
             <!-- Payload.h source -->
@@ -212,11 +213,6 @@
                   ZIP: <strong>proxy DLL</strong> (hidden) · <strong>original DLL</strong> (hidden) · <strong>host EXE</strong> · <em>_\bind file</em> (if set).
                 </span>
               </label>
-
-              <fieldset class="field">
-                <legend>Sideload flags</legend>
-                <label class="check"><input type="checkbox" name="inject" id="bld-inject"> <span>ENABLE_INJECT — migrate shellcode to idle process on reboot, terminate host</span></label>
-              </fieldset>
 
             </div>
 

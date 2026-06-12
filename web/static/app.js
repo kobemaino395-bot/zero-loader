@@ -567,6 +567,7 @@ function syncBuildMode() {
   const mode = $("input[name=mode]:checked", $("#form-build"))?.value;
   $("#field-sideload-config")?.classList.toggle("hidden", mode !== "sideload");
   $("#field-exe-name")?.classList.toggle("hidden", mode === "sideload");
+  $("#field-inject-opt")?.classList.toggle("hidden", mode !== "sideload");
 }
 $$("input[name=mode]").forEach(r => r.addEventListener("change", () => {
   syncBuildMode();
