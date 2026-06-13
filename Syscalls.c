@@ -336,6 +336,7 @@ BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis) {
         { NtWaitForSingleObject_JOAAT,   &pNtApis->NtWaitForSingleObject   },
         { NtCreateSection_JOAAT,         &pNtApis->NtCreateSection         },
         { NtMapViewOfSection_JOAAT,      &pNtApis->NtMapViewOfSection      },
+        { NtCreateThreadEx_JOAAT,        &pNtApis->NtCreateThreadEx        },
     };
     const DWORD nTargets = (DWORD)(sizeof(targets) / sizeof(targets[0]));
     DWORD nResolved = 0;

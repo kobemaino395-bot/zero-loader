@@ -565,14 +565,9 @@ function syncBindRenameExt() {
 
 function syncBuildMode() {
   const mode = $("input[name=mode]:checked", $("#form-build"))?.value;
-  const uac  = $("#bld-uac")?.checked;
   $("#field-sideload-config")?.classList.toggle("hidden", mode !== "sideload");
   $("#field-exe-name")?.classList.toggle("hidden", mode === "sideload");
-  $("#field-inject-opt")?.classList.toggle("hidden", mode !== "sideload");
-  $("#field-wdexcl-opt")?.classList.toggle("hidden", !uac);
-  if (!uac && $("#bld-wdexcl")) $("#bld-wdexcl").checked = false;
 }
-$("#bld-uac")?.addEventListener("change", syncBuildMode);
 $$("input[name=mode]").forEach(r => r.addEventListener("change", () => {
   syncBuildMode();
   // Persist the chosen mode so it survives page reloads
@@ -598,11 +593,8 @@ $("#form-build").addEventListener("submit", async (e) => {
   const mode = $("input[name=mode]:checked", form)?.value;
   const body = {
     mode,
-    uac:                form.uac.checked,
     rwx:                form.rwx.checked,
     debug:              form.debug.checked,
-    inject:             form.inject?.checked  || false,
-    wd_excl:            form.wd_excl?.checked || false,
     exe_output_name:    $("#bld-exe-name")?.value.trim()   || "",
     encrypt_history_id: $("#bld-payload-sel")?.value       || "",
     dll_id:             $("#sl-dll-sel")?.value            || "",
@@ -692,11 +684,8 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
     const rows = [];
     if (p.type === "build" || p.mode) {
       rows.push(["Mode", p.mode || "exe"]);
-      rows.push(["UAC", p.uac ? "yes" : "no"]);
       rows.push(["RWX", p.rwx ? "yes" : "no"]);
       rows.push(["Debug", p.debug ? "yes" : "no"]);
-      if (p.inject)   rows.push(["Inject",   "yes"]);
-      if (p.wd_excl)  rows.push(["WD Excl",  "yes"]);
       if (p.exe_output_name) rows.push(["Output", p.exe_output_name]);
       if (p.dll_id)  { const d = _dlls.find(x => x.id === p.dll_id);  rows.push(["DLL",       d ? d.name : p.dll_id]); }
       if (p.exe_id)  { const x = _exes.find(x => x.id === p.exe_id);  rows.push(["Host EXE",  x ? x.name : p.exe_id]); }
@@ -731,7 +720,7 @@ function _renderProfileList(profiles, listEl, emptyEl, loadFn, delFn) {
 
 function _profileMeta(p) {
   if (p.type === "build" || (!p.type && p.mode)) {
-    const flags = [p.mode||"exe", p.uac?"uac":"", p.wd_excl?"wdx":"", p.rwx?"rwx":"", p.debug?"dbg":""].filter(Boolean).join(" · ");
+    const flags = [p.mode||"exe", p.rwx?"rwx":"", p.debug?"dbg":""].filter(Boolean).join(" · ");
     return flags + (p.encrypt_history_id ? ` · enc:#${p.encrypt_history_id.slice(0,6)}` : "");
   }
   return (p.shellcode_job_id ? `#${p.shellcode_job_id.slice(0,6)}` : "—");
@@ -786,11 +775,8 @@ function loadBldProfile(id) {
   $("#btn-show-save-bld-profile").textContent = `↺ ${p.name}`;
   const modeEl = $(`#form-build input[name=mode][value="${p.mode || "exe"}"]`);
   if (modeEl) { modeEl.checked = true; try { localStorage.setItem("zeroBuildMode", p.mode||"exe"); } catch(_){} }
-  $("#bld-uac").checked    = !!p.uac;
   $("#bld-rwx").checked    = !!p.rwx;
   $("#bld-debug").checked  = !!p.debug;
-  $("#bld-inject").checked  = !!p.inject;
-  $("#bld-wdexcl").checked  = !!p.wd_excl;
   const dllSel = $("#sl-dll-sel");
   if (dllSel && p.dll_id) { dllSel.value = p.dll_id; if (dllSel.value !== p.dll_id) dllSel.value = ""; }
   const exeSel = $("#sl-exe-sel");
@@ -844,11 +830,8 @@ function collectBuildData() {
     bind_id:            $("#sl-bind-sel")?.value           || "",
     bind_rename:        getFilenameInputValue("sl-bind-rename"),
     mode:               $("input[name=mode]:checked")?.value || "exe",
-    uac:                $("#bld-uac")?.checked    || false,
     rwx:                $("#bld-rwx")?.checked    || false,
     debug:              $("#bld-debug")?.checked  || false,
-    inject:             $("#bld-inject")?.checked  || false,
-    wd_excl:            $("#bld-wdexcl")?.checked  || false,
   };
 }
 
@@ -1091,7 +1074,7 @@ function renderBuildHistory() {
     el.className = "hist-item";
     const dot     = j.ok ? `<span class="ji-dot dot-ok">●</span>` : `<span class="ji-dot dot-bad">○</span>`;
     const dateStr = fmtTimeShort(j.created_at);
-    const flags   = [j.mode, j.uac ? "uac" : "", j.wd_excl ? "wdx" : "", j.rwx ? "rwx" : "", j.debug ? "dbg" : "", j.inject ? "inj" : ""]
+    const flags   = [j.mode, j.rwx ? "rwx" : "", j.debug ? "dbg" : ""]
                       .filter(Boolean).join(" · ");
 
     let dls = `<a class="btn-xs" href="/api/build/history/${j.id}/download/output" title="Download build log">↓ log</a>`;

