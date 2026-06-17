@@ -52,13 +52,26 @@ static fnNtWait2       g_pfnNtWait           = NULL;
 //
 // EDR integrity checks see unmodified ntdll code.
 // -----------------------------------------------
+// MS Visual C thread-naming exception: raised intentionally (continuable,
+// flags=0) by WinINet to name internal threads.  Normally caught by an
+// __try/__except(EXCEPTION_EXECUTE_HANDLER) block in the caller, but on
+// some Windows 11 builds that SEH handler is not found (missing exception-
+// table coverage in the raising code).  Returning CONTINUE_EXECUTION here
+// is safe: ctx->Rip == the instruction after the RaiseException call, so
+// execution resumes exactly where it would have after the __except block.
+#define MS_VC_EXCEPTION 0x406D1388U
+
 static LONG WINAPI HwBpVehHandler(PEXCEPTION_POINTERS pExInfo) {
 
-    if (pExInfo->ExceptionRecord->ExceptionCode != STATUS_SINGLE_STEP) {
-        LOG_HEX("[!] VEH: exc=", pExInfo->ExceptionRecord->ExceptionCode);
-        LOG_HEX("[!] VEH: rip=", (DWORD)(ULONG_PTR)pExInfo->ContextRecord->Rip);
+    DWORD code = pExInfo->ExceptionRecord->ExceptionCode;
+
+    // Swallow the thread-naming exception before it becomes unhandled.
+    if (code == MS_VC_EXCEPTION &&
+        !(pExInfo->ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE))
+        return EXCEPTION_CONTINUE_EXECUTION;
+
+    if (code != STATUS_SINGLE_STEP)
         return EXCEPTION_CONTINUE_SEARCH;
-    }
 
     PCONTEXT ctx = pExInfo->ContextRecord;
 
