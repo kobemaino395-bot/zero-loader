@@ -54,8 +54,11 @@ static fnNtWait2       g_pfnNtWait           = NULL;
 // -----------------------------------------------
 static LONG WINAPI HwBpVehHandler(PEXCEPTION_POINTERS pExInfo) {
 
-    if (pExInfo->ExceptionRecord->ExceptionCode != STATUS_SINGLE_STEP)
+    if (pExInfo->ExceptionRecord->ExceptionCode != STATUS_SINGLE_STEP) {
+        LOG_HEX("[!] VEH: exc=", pExInfo->ExceptionRecord->ExceptionCode);
+        LOG_HEX("[!] VEH: rip=", (DWORD)(ULONG_PTR)pExInfo->ContextRecord->Rip);
         return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     PCONTEXT ctx = pExInfo->ContextRecord;
 
