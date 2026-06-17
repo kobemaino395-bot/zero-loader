@@ -64,7 +64,6 @@
 #define FindNextFileA_JOAAT             0x5D8A9C6B
 #define FindClose_JOAAT                 0x1FF88458
 #define GetCommandLineA_JOAAT           0x14D7236E  // persistence-launch guard in Sideload.c
-#define ShellExecuteA_JOAAT             0xF81D35ED  // shell32!ShellExecuteA for lure opening
 
 // ----------- Install.c / Persist.c (kernel32) -----------
 #define GetModuleFileNameW_JOAAT        0x6EEA1E33

